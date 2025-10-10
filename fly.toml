@@ -23,14 +23,3 @@ app = "api-peliculas-jose"
     interval = "15s"
     restart_limit = 3
     timeout = "2s"
-
-# 🔧 Auto-suspend configuration
-# Fly.io suspende automáticamente las máquinas cuando no hay tráfico HTTP
-# Pero aquí reforzamos el comportamiento usando auto_stop y auto_start.
-
-[[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
-  auto_start = true
-  auto_stop = true
-  stop_timeout = "1m"

@@ -1,6 +1,6 @@
 app = "api-peliculas"
 
-primary_region = "scl" # Puedes cambiar "scl" (Santiago) por "mia", "gru", etc.
+primary_region = "mia" # Puedes cambiar "scl" (Santiago) por "mia", "gru", etc.
 
 [build]
   image = "node:18-bullseye"

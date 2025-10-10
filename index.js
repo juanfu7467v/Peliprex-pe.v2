@@ -5,19 +5,39 @@ import fs from "fs";
 const app = express();
 app.use(cors());
 
-// Cargar los datos del archivo JSON
+// Cargar las películas desde el JSON
 const peliculas = JSON.parse(fs.readFileSync("./peliculas.json", "utf8"));
+
+// --- Control de inactividad ---
+let ultimaPeticion = Date.now();
+const TIEMPO_INACTIVIDAD = 60 * 1000; // 1 minuto
+
+function revisarInactividad() {
+  const ahora = Date.now();
+  const inactivo = ahora - ultimaPeticion;
+  if (inactivo >= TIEMPO_INACTIVIDAD) {
+    console.log("🕒 Sin tráfico por 1 minuto. Cerrando servidor para ahorrar recursos...");
+    process.exit(0); // Apaga el proceso
+  }
+}
+setInterval(revisarInactividad, 30000); // Revisa cada 30 segundos
+
+// Middleware que actualiza la última petición
+app.use((req, res, next) => {
+  ultimaPeticion = Date.now();
+  next();
+});
 
 // 🏠 Ruta principal
 app.get("/", (req, res) => {
   res.json({
     mensaje: "🎬 API de Películas funcionando correctamente",
     total: peliculas.length,
-    ejemplo: "/peliculas o /peliculas/El%20Padrino"
+    ejemplo: "/peliculas o /peliculas/El%20Padrino",
   });
 });
 
-// 📄 Obtener todas las películas
+// 📄 Todas las películas
 app.get("/peliculas", (req, res) => {
   res.json(peliculas);
 });
@@ -25,7 +45,7 @@ app.get("/peliculas", (req, res) => {
 // 🔍 Buscar película por título
 app.get("/peliculas/:titulo", (req, res) => {
   const titulo = decodeURIComponent(req.params.titulo).toLowerCase();
-  const resultado = peliculas.filter(p =>
+  const resultado = peliculas.filter((p) =>
     p.titulo.toLowerCase().includes(titulo)
   );
   if (resultado.length > 0) {
@@ -40,30 +60,25 @@ app.get("/buscar", (req, res) => {
   const { año, genero, idioma, desde, hasta } = req.query;
   let resultados = peliculas;
 
-  if (año) {
-    resultados = resultados.filter(p => p.año === año);
-  }
-  if (genero) {
-    resultados = resultados.filter(p =>
+  if (año) resultados = resultados.filter((p) => p.año === año);
+  if (genero)
+    resultados = resultados.filter((p) =>
       p.generos.toLowerCase().includes(genero.toLowerCase())
     );
-  }
-  if (idioma) {
+  if (idioma)
     resultados = resultados.filter(
-      p => p.idioma_original.toLowerCase() === idioma.toLowerCase()
+      (p) => p.idioma_original.toLowerCase() === idioma.toLowerCase()
     );
-  }
-  if (desde && hasta) {
+  if (desde && hasta)
     resultados = resultados.filter(
-      p =>
+      (p) =>
         parseInt(p.año) >= parseInt(desde) &&
         parseInt(p.año) <= parseInt(hasta)
     );
-  }
 
   res.json({
     total: resultados.length,
-    resultados
+    resultados,
   });
 });
 

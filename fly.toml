@@ -1,13 +1,7 @@
-# fly.toml file generated for peliprex-pe-v2
-app = "peliprex-pe-v2"
-primary_region = "gru"  # Región válida en Fly.io (São Paulo, Brasil)
+app = "api-peliculas-jose"
 
 [build]
-  image = "node:18-bullseye"
-
-[env]
-  PORT = "8080"
-  NODE_ENV = "production"
+  builder = "paketobuildpacks/builder:base"
 
 [[services]]
   internal_port = 8080
@@ -22,7 +16,7 @@ primary_region = "gru"  # Región válida en Fly.io (São Paulo, Brasil)
     port = 443
 
   [[services.tcp_checks]]
-    interval = "10s"
+    grace_period = "5s"
+    interval = "15s"
+    restart_limit = 6
     timeout = "2s"
-    grace_period = "10s"
-    restart_limit = 0

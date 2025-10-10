@@ -3,79 +3,72 @@ import cors from "cors";
 import fs from "fs";
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-
-// Middleware
 app.use(cors());
-app.use(express.json());
 
-// Cargar las películas desde el archivo JSON
-let peliculas = [];
-try {
-  const data = fs.readFileSync("./peliculas.json", "utf-8");
-  peliculas = JSON.parse(data);
-  console.log(`✅ ${peliculas.length} películas cargadas correctamente.`);
-} catch (err) {
-  console.error("❌ Error al cargar peliculas.json:", err);
-}
+// Cargar los datos del archivo JSON
+const peliculas = JSON.parse(fs.readFileSync("./peliculas.json", "utf8"));
 
-// Ruta principal
+// 🏠 Ruta principal
 app.get("/", (req, res) => {
-  res.send({
-    mensaje: "🎬 Bienvenido a la API de Películas",
-    endpoints: {
-      todas: "/peliculas",
-      buscar: "/peliculas?titulo=nombre",
-      por_genero: "/peliculas?genero=accion",
-      por_año: "/peliculas?anio=2020"
-    }
+  res.json({
+    mensaje: "🎬 API de Películas funcionando correctamente",
+    total: peliculas.length,
+    ejemplo: "/peliculas o /peliculas/El%20Padrino"
   });
 });
 
-// Obtener todas las películas
+// 📄 Obtener todas las películas
 app.get("/peliculas", (req, res) => {
-  const { titulo, genero, anio } = req.query;
+  res.json(peliculas);
+});
+
+// 🔍 Buscar película por título
+app.get("/peliculas/:titulo", (req, res) => {
+  const titulo = decodeURIComponent(req.params.titulo).toLowerCase();
+  const resultado = peliculas.filter(p =>
+    p.titulo.toLowerCase().includes(titulo)
+  );
+  if (resultado.length > 0) {
+    res.json(resultado);
+  } else {
+    res.status(404).json({ error: "Película no encontrada" });
+  }
+});
+
+// 🔎 Búsqueda avanzada (por año, género, idioma, etc.)
+app.get("/buscar", (req, res) => {
+  const { año, genero, idioma, desde, hasta } = req.query;
   let resultados = peliculas;
 
-  if (titulo) {
-    const query = titulo.toLowerCase();
-    resultados = resultados.filter(p =>
-      p.titulo.toLowerCase().includes(query)
-    );
+  if (año) {
+    resultados = resultados.filter(p => p.año === año);
   }
-
   if (genero) {
-    const query = genero.toLowerCase();
     resultados = resultados.filter(p =>
-      p.generos.toLowerCase().includes(query)
+      p.generos.toLowerCase().includes(genero.toLowerCase())
+    );
+  }
+  if (idioma) {
+    resultados = resultados.filter(
+      p => p.idioma_original.toLowerCase() === idioma.toLowerCase()
+    );
+  }
+  if (desde && hasta) {
+    resultados = resultados.filter(
+      p =>
+        parseInt(p.año) >= parseInt(desde) &&
+        parseInt(p.año) <= parseInt(hasta)
     );
   }
 
-  if (anio) {
-    resultados = resultados.filter(p => p.año === anio);
-  }
-
-  res.json(resultados);
+  res.json({
+    total: resultados.length,
+    resultados
+  });
 });
 
-// Obtener una película exacta por título
-app.get("/pelicula/:titulo", (req, res) => {
-  const titulo = decodeURIComponent(req.params.titulo).toLowerCase();
-  const pelicula = peliculas.find(p => p.titulo.toLowerCase() === titulo);
-
-  if (!pelicula) {
-    return res.status(404).json({ error: "Película no encontrada" });
-  }
-
-  res.json(pelicula);
-});
-
-// Manejar rutas no encontradas
-app.use((req, res) => {
-  res.status(404).json({ error: "Ruta no encontrada" });
-});
-
-// Iniciar servidor
+// 🌍 Iniciar servidor
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en http://localhost:${PORT}`);
+  console.log(`✅ Servidor corriendo en http://localhost:${PORT}`);
 });

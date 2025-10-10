@@ -1,10 +1,13 @@
 app = "api-peliculas"
 
+primary_region = "scl" # Puedes cambiar "scl" (Santiago) por "mia", "gru", etc.
+
 [build]
-  builder = "heroku/buildpacks:20"
+  image = "node:18-bullseye"
 
 [env]
   PORT = "8080"
+  NODE_ENV = "production"
 
 [[services]]
   internal_port = 8080
@@ -22,4 +25,3 @@ app = "api-peliculas"
     interval = "10s"
     timeout = "2s"
     grace_period = "10s"
-    restart_limit = 0

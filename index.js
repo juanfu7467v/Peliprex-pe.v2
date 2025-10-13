@@ -16,13 +16,29 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
 const BACKUP_FILE_NAME = "users_data.json";
 
-// 🔑 Claves de API (Mantenidas)
-const TMDB_API_KEY = "392ee84e8d4ef03605cc1faa6c40b2a8";
-const YOUTUBE_API_KEY = "AIzaSyDoT2sEt2y9a-H55keel8E6xdo3CMIHiG4";
+// 🔑 Claves de API (Obtenidas de Variables de Entorno/Secrets)
+// Asegúrate de configurar TMDB_API_KEY y YOUTUBE_API_KEY en tus secretos/variables de entorno.
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+
+if (!TMDB_API_KEY) console.error("❌ ERROR: La variable de entorno TMDB_API_KEY no está configurada.");
+if (!YOUTUBE_API_KEY) console.error("❌ ERROR: La variable de entorno YOUTUBE_API_KEY no está configurada.");
+
 
 // 📂 Archivos locales (Mantenidos)
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
+
+// ------------------- FUNCIONES AUXILIARES -------------------
+
+/** Limpia la URL de la película eliminando la duplicidad '/prepreview' para corregir a '/preview'. */
+function cleanPeliculaUrl(url) {
+  if (!url) return url;
+  // Reemplaza '/prepreview' con '/preview' para corregir el error en la URL de Google Drive (o similar).
+  // El $1 asegura que se mantenga cualquier parámetro de consulta (?...) o hash (#...).
+  return url.replace(/\/prepreview([?#]|$)/, '/preview$1');
+}
+
 
 // ------------------- FUNCIONES DE GITHUB -------------------
 
@@ -303,7 +319,9 @@ app.get("/user/setplan", (req, res) => {
 // Favoritos
 app.get("/user/add_favorite", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, imagen_url, pelicula_url } = req.query;
+  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
 
@@ -325,7 +343,9 @@ app.get("/user/favorites", (req, res) => {
 // Historial
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, pelicula_url, imagen_url } = req.query;
+  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
 
@@ -432,6 +452,11 @@ app.get("/user/activity", (req, res) => {
 
 // ------------------- RESPALDO TMDb + YouTube -------------------
 async function buscarPeliculaRespaldo(titulo) {
+  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
+      console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
+      return null;
+  }
+  
   try {
     const url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(titulo)}`;
     const resp = await fetch(url);
@@ -443,8 +468,10 @@ async function buscarPeliculaRespaldo(titulo) {
     const detallesResp = await fetch(detallesUrl);
     const detalles = await detallesResp.json();
 
-    // 🎯 Lógica para buscar la película completa en YouTube (ya implementada)
-    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(pelicula.title + " película completa")}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
+    // 🎯 Lógica para buscar la película completa en YouTube
+    // Se utiliza "película completa" para asegurar un resultado que no sea un tráiler.
+    const youtubeQuery = pelicula.title + " película completa español latino"; // Añadimos 'español latino' para mejorar la búsqueda
+    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
     const youtubeResp = await fetch(youtubeUrl);
     const youtubeData = await youtubeResp.json();
     const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
@@ -460,11 +487,12 @@ async function buscarPeliculaRespaldo(titulo) {
       imagen_url: pelicula.poster_path
         ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
         : "",
-      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
+      // Si se encuentra en YouTube, se usa su URL, si no, es null.
+      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null, 
       respaldo: true
     };
   } catch (err) {
-    console.error("❌ Error TMDb:", err.message);
+    console.error("❌ Error TMDb o YouTube:", err.message);
     return null;
   }
 }

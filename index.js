@@ -1,4 +1,4 @@
-// index.js — PeliPREX API v3 (con respaldo GitHub persistente)
+// index.js — PeliPREX API v4 (con catálogo y ajustes avanzados)
 // Autor: José (PeliPREX Developer)
 
 import express from "express";
@@ -27,9 +27,23 @@ function ensureUsersFile() {
   }
 }
 
+function ensurePeliculasFile() {
+  if (!fs.existsSync(PELIS_FILE)) {
+    fs.writeFileSync(
+      PELIS_FILE,
+      JSON.stringify({ peliculas: [] }, null, 2)
+    );
+  }
+}
+
 function readUsersData() {
   ensureUsersFile();
   return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+}
+
+function readPeliculasData() {
+  ensurePeliculasFile();
+  return JSON.parse(fs.readFileSync(PELIS_FILE, "utf8")).peliculas;
 }
 
 function writeUsersData(data) {
@@ -48,6 +62,11 @@ function getOrCreateUser(email) {
       favorites: [],
       history: [],
       resume: {},
+      ajustes: {
+        modoOscuro: false,
+        idioma: "es",
+        notificaciones: true,
+      },
       stats: {
         vistasTotales: 0,
         favoritasTotales: 0,
@@ -146,12 +165,56 @@ app.use((req, res, next) => {
   next();
 });
 
-// ------------------- ENDPOINTS PRINCIPALES -------------------
+// ------------------- ENDPOINT PRINCIPAL -------------------
 app.get("/", (req, res) => {
   res.json({
     mensaje: "🎥 PeliPREX API funcionando correctamente",
     ejemplo: "/peliculas o /user/get?email=tuemail@gmail.com",
   });
+});
+
+// ------------------- ENDPOINTS DE CATÁLOGO -------------------
+app.get("/peliculas", (req, res) => {
+  try {
+    const peliculas = readPeliculasData();
+    res.json(peliculas);
+  } catch (error) {
+    res.status(500).json({ error: "No se pudo cargar el catálogo de películas." });
+  }
+});
+
+// Buscar por nombre parcial o palabra clave
+app.get("/peliculas/search", (req, res) => {
+  const q = (req.query.q || "").toLowerCase();
+  if (!q) return res.json([]);
+
+  const peliculas = readPeliculasData();
+  const resultados = peliculas.filter(p =>
+    p.titulo.toLowerCase().includes(q)
+  );
+
+  res.json(resultados);
+});
+
+// ------------------- ENDPOINTS DE AJUSTES -------------------
+app.get("/user/get_settings", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const user = getOrCreateUser(email);
+  res.json(user.ajustes);
+});
+
+app.get("/user/update_settings", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const user = getOrCreateUser(email);
+
+  const { modoOscuro, idioma, notificaciones } = req.query;
+  if (modoOscuro !== undefined) user.ajustes.modoOscuro = modoOscuro === "true";
+  if (idioma) user.ajustes.idioma = idioma;
+  if (notificaciones !== undefined)
+    user.ajustes.notificaciones = notificaciones === "true";
+
+  saveUser(email, user);
+  res.json({ ok: true, ajustes: user.ajustes });
 });
 
 // ------------------- ENDPOINTS DE USUARIOS -------------------
@@ -219,6 +282,7 @@ app.get("/user/remove_favorite", (req, res) => {
 // ------------------- INICIAR SERVIDOR -------------------
 const PORT = process.env.PORT || 8080;
 restoreFromGitHub().then(() => {
+  ensurePeliculasFile();
   app.listen(PORT, () =>
     console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
   );

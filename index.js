@@ -340,6 +340,45 @@ app.get("/user/favorites", (req, res) => {
   res.json({ total: user.favorites.length, favorites: user.favorites });
 });
 
+// **NUEVAS RUTAS DE ELIMINACIÓN DE FAVORITOS (Añadido)**
+
+// ELIMINAR TODOS LOS FAVORITOS
+app.get("/user/favorites/clear", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  if (!email) return res.status(400).json({ error: "Falta email" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  user.favorites = []; // Vaciar el array de favoritos
+  saveUser(email, user);
+  
+  res.json({ ok: true, message: "Lista de favoritos eliminada." });
+});
+
+// ELIMINAR UNA PELÍCULA DE FAVORITOS
+app.get("/user/favorites/remove", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const raw_pelicula_url = req.query.pelicula_url;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  
+  if (!email || !pelicula_url) 
+    return res.status(400).json({ error: "Faltan email o pelicula_url" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  const initialLength = user.favorites.length;
+  // Filtrar favoritos para excluir la película con esa URL
+  user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
+  
+  if (user.favorites.length < initialLength) {
+    saveUser(email, user);
+    return res.json({ ok: true, message: "Película eliminada de favoritos." });
+  }
+  res.status(404).json({ ok: false, message: "Película no encontrada en favoritos." });
+});
+
 // Historial
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
@@ -362,6 +401,46 @@ app.get("/user/history", (req, res) => {
   const user = getOrCreateUser(email);
   res.json({ total: user.history.length, history: user.history });
 });
+
+// **NUEVAS RUTAS DE ELIMINACIÓN DE HISTORIAL (Añadido)**
+
+// ELIMINAR TODO EL HISTORIAL
+app.get("/user/history/clear", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  if (!email) return res.status(400).json({ error: "Falta email" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  user.history = []; // Vaciar el array del historial
+  saveUser(email, user);
+  
+  res.json({ ok: true, message: "Historial de películas eliminado." });
+});
+
+// ELIMINAR UNA PELÍCULA DEL HISTORIAL
+app.get("/user/history/remove", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const raw_pelicula_url = req.query.pelicula_url;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  
+  if (!email || !pelicula_url) 
+    return res.status(400).json({ error: "Faltan email o pelicula_url" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  const initialLength = user.history.length;
+  // Filtrar el historial para excluir la película con esa URL
+  user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
+  
+  if (user.history.length < initialLength) {
+    saveUser(email, user);
+    return res.json({ ok: true, message: "Película eliminada del historial." });
+  }
+  res.status(404).json({ ok: false, message: "Película no encontrada en el historial." });
+});
+
 
 // ------------------- NUEVOS ENDPOINTS -------------------
 

@@ -1,4 +1,4 @@
-// index.js — Peliprex API v2 con respaldo GitHub + TMDb + YouTube + Sistema de usuarios
+// index.js — PeliPREX API v3 (con respaldo GitHub persistente)
 // Autor: José (PeliPREX Developer)
 
 import express from "express";
@@ -10,11 +10,9 @@ import path from "path";
 const app = express();
 app.use(cors());
 
-// 🧩 Variables de entorno para respaldo en GitHub
+// 🔑 Variables de entorno
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO; // ej. JoseDeveloper/peliprex-data
-
-// 🔑 Claves de API
+const GITHUB_REPO = process.env.GITHUB_REPO;
 const TMDB_API_KEY = "392ee84e8d4ef03605cc1faa6c40b2a8";
 const YOUTUBE_API_KEY = "AIzaSyDoT2sEt2y9a-H55keel8E6xdo3CMIHiG4";
 
@@ -66,6 +64,33 @@ function saveUser(email, userObj) {
   writeUsersData(data);
 }
 
+// ------------------- RESTAURAR DESDE GITHUB -------------------
+async function restoreFromGitHub() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) {
+    console.warn("⚠️ No hay credenciales de GitHub. No se restaurará respaldo.");
+    return;
+  }
+
+  const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/contents/users_data.json`;
+  try {
+    const res = await fetch(apiUrl, {
+      headers: { Authorization: `token ${GITHUB_TOKEN}` },
+    });
+    if (res.status === 200) {
+      const data = await res.json();
+      const content = Buffer.from(data.content, "base64").toString("utf8");
+      fs.writeFileSync(USERS_FILE, content);
+      console.log("✅ Respaldo restaurado correctamente desde GitHub.");
+    } else {
+      console.log("📂 No hay respaldo previo en GitHub (nuevo archivo).");
+      ensureUsersFile();
+      await backupToGitHub();
+    }
+  } catch (err) {
+    console.error("❌ Error restaurando desde GitHub:", err.message);
+  }
+}
+
 // ------------------- RESPALDO AUTOMÁTICO GITHUB -------------------
 async function backupToGitHub() {
   if (!GITHUB_TOKEN || !GITHUB_REPO) {
@@ -79,7 +104,6 @@ async function backupToGitHub() {
   try {
     const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/contents/users_data.json`;
 
-    // Verificar si ya existe el archivo para obtener su SHA
     const existing = await fetch(apiUrl, {
       headers: { Authorization: `token ${GITHUB_TOKEN}` },
     });
@@ -106,16 +130,6 @@ async function backupToGitHub() {
   }
 }
 
-// ------------------- CARGAR PELÍCULAS -------------------
-let peliculas = [];
-try {
-  peliculas = JSON.parse(fs.readFileSync(PELIS_FILE, "utf8"));
-  console.log(`🎬 Cargadas ${peliculas.length} películas desde peliculas.json`);
-} catch (err) {
-  console.error("❌ Error cargando peliculas.json:", err.message);
-  peliculas = [];
-}
-
 // ------------------- CONTROL DE INACTIVIDAD -------------------
 let ultimaPeticion = Date.now();
 const TIEMPO_INACTIVIDAD = 60 * 1000;
@@ -136,27 +150,8 @@ app.use((req, res, next) => {
 app.get("/", (req, res) => {
   res.json({
     mensaje: "🎥 PeliPREX API funcionando correctamente",
-    total: peliculas.length,
     ejemplo: "/peliculas o /user/get?email=tuemail@gmail.com",
   });
-});
-
-app.get("/peliculas", (req, res) => res.json(peliculas));
-
-// 🔍 Buscar película local o respaldo TMDb
-app.get("/peliculas/:titulo", async (req, res) => {
-  const titulo = decodeURIComponent(req.params.titulo || "").toLowerCase();
-  const resultado = peliculas.filter(p =>
-    (p.titulo || "").toLowerCase().includes(titulo)
-  );
-
-  if (resultado.length > 0)
-    return res.json({ fuente: "local", resultados: resultado });
-
-  const respaldo = await buscarPeliculaRespaldo(titulo);
-  if (respaldo) return res.json({ fuente: "respaldo", resultados: [respaldo] });
-
-  res.status(404).json({ error: "No se encontró la película." });
 });
 
 // ------------------- ENDPOINTS DE USUARIOS -------------------
@@ -165,16 +160,6 @@ app.get("/user/get", (req, res) => {
   res.json(getOrCreateUser(email));
 });
 
-app.get("/user/setplan", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const tipoPlan = req.query.tipoPlan || "creditos";
-  const user = getOrCreateUser(email);
-  user.tipoPlan = tipoPlan;
-  saveUser(email, user);
-  res.json({ ok: true, user });
-});
-
-// ⭐ Favoritos
 app.get("/user/add_favorite", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const { titulo, imagen_url, pelicula_url } = req.query;
@@ -195,13 +180,6 @@ app.get("/user/add_favorite", (req, res) => {
   res.json({ ok: true, favorites: user.favorites });
 });
 
-app.get("/user/favorites", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const user = getOrCreateUser(email);
-  res.json({ total: user.favorites.length, favorites: user.favorites });
-});
-
-// 🎞️ Historial
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const { titulo, pelicula_url, imagen_url } = req.query;
@@ -221,85 +199,27 @@ app.get("/user/add_history", (req, res) => {
   res.json({ ok: true, total: user.history.length });
 });
 
-app.get("/user/history", (req, res) => {
+app.get("/user/clear_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const user = getOrCreateUser(email);
-  res.json({ total: user.history.length, history: user.history });
-});
-
-// 📈 Perfil con estadísticas
-app.get("/user/profile", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const user = getOrCreateUser(email);
-  const perfil = {
-    email: user.email,
-    tipoPlan: user.tipoPlan,
-    credits: user.credits,
-    totalFavoritos: user.favorites.length,
-    totalHistorial: user.history.length,
-    vistasTotales: user.stats.vistasTotales,
-    favoritasTotales: user.stats.favoritasTotales,
-    ultimaActividad:
-      user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
-  };
-  res.json({ perfil });
-});
-
-// 🔁 Refrescar datos
-app.get("/user/favorites/refresh", async (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const user = getOrCreateUser(email);
-  const refreshed = [];
-  for (const f of user.favorites) {
-    const nueva = await buscarPeliculaRespaldo(f.titulo);
-    if (nueva) refreshed.push(nueva);
-  }
-  user.favorites = refreshed;
+  user.history = [];
   saveUser(email, user);
-  res.json({ ok: true, refreshed });
+  res.json({ ok: true, message: "Historial eliminado." });
 });
 
-// ------------------- TMDb + YOUTUBE -------------------
-async function buscarPeliculaRespaldo(titulo) {
-  try {
-    const tmdbUrl = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(
-      titulo
-    )}`;
-    const resp = await fetch(tmdbUrl);
-    const data = await resp.json();
-    if (!data.results || data.results.length === 0) return null;
-
-    const peli = data.results[0];
-    const detallesUrl = `https://api.themoviedb.org/3/movie/${peli.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
-    const detalles = await (await fetch(detallesUrl)).json();
-
-    const ytUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(
-      peli.title + " película completa"
-    )}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
-    const ytData = await (await fetch(ytUrl)).json();
-    const youtubeId = ytData.items?.[0]?.id?.videoId || null;
-
-    return {
-      titulo: peli.title,
-      descripcion: peli.overview || "",
-      fecha_lanzamiento: peli.release_date || "",
-      idioma_original: peli.original_language || "",
-      puntuacion: peli.vote_average || 0,
-      generos: detalles.genres?.map(g => g.name).join(", ") || "",
-      imagen_url: peli.poster_path
-        ? `https://image.tmdb.org/t/p/w500${peli.poster_path}`
-        : "",
-      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
-      respaldo: true,
-    };
-  } catch (err) {
-    console.error("❌ Error TMDb:", err.message);
-    return null;
-  }
-}
+app.get("/user/remove_favorite", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const { pelicula_url } = req.query;
+  const user = getOrCreateUser(email);
+  user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
+  saveUser(email, user);
+  res.json({ ok: true, message: "Favorito eliminado." });
+});
 
 // ------------------- INICIAR SERVIDOR -------------------
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () =>
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
-);
+restoreFromGitHub().then(() => {
+  app.listen(PORT, () =>
+    console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
+  );
+});

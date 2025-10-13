@@ -1,4 +1,4 @@
-// index.js — PeliPREX API v4 (con catálogo y ajustes avanzados)
+// index.js — PeliPREX API v4.1 (catálogo local + respaldo opcional GitHub)
 // Autor: José (PeliPREX Developer)
 
 import express from "express";
@@ -10,83 +10,44 @@ import path from "path";
 const app = express();
 app.use(cors());
 
-// 🔑 Variables de entorno
+// 🔑 Claves de API y variables opcionales
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO;
-const TMDB_API_KEY = "392ee84e8d4ef03605cc1faa6c40b2a8";
-const YOUTUBE_API_KEY = "AIzaSyDoT2sEt2y9a-H55keel8E6xdo3CMIHiG4";
 
 // 📂 Archivos locales
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), "users_data.json");
 
-// ------------------- FUNCIONES DE ARCHIVOS -------------------
-function ensureUsersFile() {
-  if (!fs.existsSync(USERS_FILE)) {
-    fs.writeFileSync(USERS_FILE, JSON.stringify({ users: {} }, null, 2));
+// ---------------- FUNCIONES DE ARCHIVOS ----------------
+function ensureFile(file, defaultData) {
+  if (!fs.existsSync(file)) {
+    fs.writeFileSync(file, JSON.stringify(defaultData, null, 2));
+    console.log(`📁 Archivo creado: ${file}`);
   }
 }
 
-function ensurePeliculasFile() {
-  if (!fs.existsSync(PELIS_FILE)) {
-    fs.writeFileSync(
-      PELIS_FILE,
-      JSON.stringify({ peliculas: [] }, null, 2)
-    );
+function readJSON(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) {
+      fs.writeFileSync(file, JSON.stringify(fallback, null, 2));
+      return fallback;
+    }
+    const data = fs.readFileSync(file, "utf8");
+    return JSON.parse(data);
+  } catch (err) {
+    console.error(`❌ Error leyendo ${file}:`, err.message);
+    return fallback;
   }
 }
 
-function readUsersData() {
-  ensureUsersFile();
-  return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+function writeJSON(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-function readPeliculasData() {
-  ensurePeliculasFile();
-  return JSON.parse(fs.readFileSync(PELIS_FILE, "utf8")).peliculas;
-}
-
-function writeUsersData(data) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(data, null, 2));
-  backupToGitHub();
-}
-
-function getOrCreateUser(email) {
-  if (!email) return null;
-  const data = readUsersData();
-  if (!data.users[email]) {
-    data.users[email] = {
-      email,
-      tipoPlan: "creditos",
-      credits: 5,
-      favorites: [],
-      history: [],
-      resume: {},
-      ajustes: {
-        modoOscuro: false,
-        idioma: "es",
-        notificaciones: true,
-      },
-      stats: {
-        vistasTotales: 0,
-        favoritasTotales: 0,
-      },
-    };
-    writeUsersData(data);
-  }
-  return data.users[email];
-}
-
-function saveUser(email, userObj) {
-  const data = readUsersData();
-  data.users[email] = userObj;
-  writeUsersData(data);
-}
-
-// ------------------- RESTAURAR DESDE GITHUB -------------------
+// ---------------- RESTAURAR DESDE GITHUB ----------------
 async function restoreFromGitHub() {
   if (!GITHUB_TOKEN || !GITHUB_REPO) {
-    console.warn("⚠️ No hay credenciales de GitHub. No se restaurará respaldo.");
+    console.warn("⚠️ No hay credenciales de GitHub. Se omite restauración.");
     return;
   }
 
@@ -102,7 +63,7 @@ async function restoreFromGitHub() {
       console.log("✅ Respaldo restaurado correctamente desde GitHub.");
     } else {
       console.log("📂 No hay respaldo previo en GitHub (nuevo archivo).");
-      ensureUsersFile();
+      ensureFile(USERS_FILE, { users: {} });
       await backupToGitHub();
     }
   } catch (err) {
@@ -110,17 +71,12 @@ async function restoreFromGitHub() {
   }
 }
 
-// ------------------- RESPALDO AUTOMÁTICO GITHUB -------------------
+// ---------------- RESPALDO AUTOMÁTICO ----------------
 async function backupToGitHub() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) {
-    console.warn("⚠️ No hay credenciales de GitHub, se omite respaldo.");
-    return;
-  }
-
-  const content = fs.readFileSync(USERS_FILE, "utf8");
-  const base64Content = Buffer.from(content).toString("base64");
-
+  if (!GITHUB_TOKEN || !GITHUB_REPO) return;
   try {
+    const content = fs.readFileSync(USERS_FILE, "utf8");
+    const base64Content = Buffer.from(content).toString("base64");
     const apiUrl = `https://api.github.com/repos/${GITHUB_REPO}/contents/users_data.json`;
 
     const existing = await fetch(apiUrl, {
@@ -149,7 +105,34 @@ async function backupToGitHub() {
   }
 }
 
-// ------------------- CONTROL DE INACTIVIDAD -------------------
+// ---------------- FUNCIONES DE USUARIOS ----------------
+function getOrCreateUser(email) {
+  if (!email) return null;
+  const data = readJSON(USERS_FILE, { users: {} });
+  if (!data.users[email]) {
+    data.users[email] = {
+      email,
+      tipoPlan: "creditos",
+      credits: 5,
+      favorites: [],
+      history: [],
+      resume: {},
+      ajustes: { modoOscuro: false, idioma: "es", notificaciones: true },
+      stats: { vistasTotales: 0, favoritasTotales: 0 },
+    };
+    writeJSON(USERS_FILE, data);
+  }
+  return data.users[email];
+}
+
+function saveUser(email, userObj) {
+  const data = readJSON(USERS_FILE, { users: {} });
+  data.users[email] = userObj;
+  writeJSON(USERS_FILE, data);
+  backupToGitHub();
+}
+
+// ---------------- CONTROL DE INACTIVIDAD ----------------
 let ultimaPeticion = Date.now();
 const TIEMPO_INACTIVIDAD = 60 * 1000;
 
@@ -165,38 +148,43 @@ app.use((req, res, next) => {
   next();
 });
 
-// ------------------- ENDPOINT PRINCIPAL -------------------
+// ---------------- ENDPOINTS PRINCIPALES ----------------
 app.get("/", (req, res) => {
   res.json({
-    mensaje: "🎥 PeliPREX API funcionando correctamente",
-    ejemplo: "/peliculas o /user/get?email=tuemail@gmail.com",
+    mensaje: "🎬 PeliPREX API funcionando correctamente",
+    ejemplo: "/peliculas, /peliculas/search?q=batman o /user/get?email=ejemplo@gmail.com",
   });
 });
 
-// ------------------- ENDPOINTS DE CATÁLOGO -------------------
+// 🔹 Cargar todas las películas
 app.get("/peliculas", (req, res) => {
   try {
-    const peliculas = readPeliculasData();
-    res.json(peliculas);
+    ensureFile(PELIS_FILE, { peliculas: [] });
+    const data = readJSON(PELIS_FILE, { peliculas: [] });
+    res.json(data.peliculas);
   } catch (error) {
+    console.error("❌ Error cargando películas:", error.message);
     res.status(500).json({ error: "No se pudo cargar el catálogo de películas." });
   }
 });
 
-// Buscar por nombre parcial o palabra clave
+// 🔹 Buscar películas por nombre parcial
 app.get("/peliculas/search", (req, res) => {
   const q = (req.query.q || "").toLowerCase();
   if (!q) return res.json([]);
-
-  const peliculas = readPeliculasData();
-  const resultados = peliculas.filter(p =>
-    p.titulo.toLowerCase().includes(q)
+  const data = readJSON(PELIS_FILE, { peliculas: [] });
+  const resultados = data.peliculas.filter(p =>
+    (p.titulo || "").toLowerCase().includes(q)
   );
-
   res.json(resultados);
 });
 
-// ------------------- ENDPOINTS DE AJUSTES -------------------
+// ---------------- AJUSTES DE USUARIO ----------------
+app.get("/user/get", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  res.json(getOrCreateUser(email));
+});
+
 app.get("/user/get_settings", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const user = getOrCreateUser(email);
@@ -206,8 +194,8 @@ app.get("/user/get_settings", (req, res) => {
 app.get("/user/update_settings", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const user = getOrCreateUser(email);
-
   const { modoOscuro, idioma, notificaciones } = req.query;
+
   if (modoOscuro !== undefined) user.ajustes.modoOscuro = modoOscuro === "true";
   if (idioma) user.ajustes.idioma = idioma;
   if (notificaciones !== undefined)
@@ -217,12 +205,7 @@ app.get("/user/update_settings", (req, res) => {
   res.json({ ok: true, ajustes: user.ajustes });
 });
 
-// ------------------- ENDPOINTS DE USUARIOS -------------------
-app.get("/user/get", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  res.json(getOrCreateUser(email));
-});
-
+// ---------------- FAVORITOS E HISTORIAL ----------------
 app.get("/user/add_favorite", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const { titulo, imagen_url, pelicula_url } = req.query;
@@ -262,28 +245,10 @@ app.get("/user/add_history", (req, res) => {
   res.json({ ok: true, total: user.history.length });
 });
 
-app.get("/user/clear_history", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const user = getOrCreateUser(email);
-  user.history = [];
-  saveUser(email, user);
-  res.json({ ok: true, message: "Historial eliminado." });
-});
-
-app.get("/user/remove_favorite", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const { pelicula_url } = req.query;
-  const user = getOrCreateUser(email);
-  user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
-  saveUser(email, user);
-  res.json({ ok: true, message: "Favorito eliminado." });
-});
-
-// ------------------- INICIAR SERVIDOR -------------------
+// ---------------- INICIAR SERVIDOR ----------------
 const PORT = process.env.PORT || 8080;
 restoreFromGitHub().then(() => {
-  ensurePeliculasFile();
-  app.listen(PORT, () =>
-    console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`)
-  );
+  ensureFile(PELIS_FILE, { peliculas: [] });
+  ensureFile(USERS_FILE, { users: {} });
+  app.listen(PORT, () => console.log(`🚀 Servidor PeliPREX en puerto ${PORT}`));
 });

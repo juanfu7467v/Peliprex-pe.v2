@@ -1,3 +1,5 @@
+
+
 // index.js — API completa de Películas con respaldo TMDb + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
 // ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos!
 
@@ -6,32 +8,28 @@ import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
 import path from "path";
-import { Buffer } from 'buffer'; // Asegurar que Buffer está disponible
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // Necesario para parsear body JSON si fuera necesario
 
-// ------------------- CLAVES DE API (Corregidas y probadas) -------------------
-// ¡ADVERTENCIA DE SEGURIDAD! Lo ideal es usar process.env.
-// Se insertan las claves directas que proporcionaste para asegurar el funcionamiento INMEDIATO.
-const TMDB_API_KEY = '392ee84e8d4ef03605cc1faa6c40b2a8'; // TU API Key de TMDb
-const YOUTUBE_API_KEY = 'AIzaSyDoT2sEt2y9a-H55keel8E6xdo3CMIHiG4'; // TU API Key de YouTube
+// ------------------- GITHUB CONFIGURACIÓN DE RESPALDO -------------------
+// ¡ASEGÚRATE de configurar las variables de entorno GITHUB_TOKEN y GITHUB_REPO!
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
+const BACKUP_FILE_NAME = "users_data.json";
+
+// 🔑 Claves de API (Obtenidas de Variables de Entorno/Secrets)
+// Asegúrate de configurar TMDB_API_KEY y YOUTUBE_API_KEY en tus secretos/variables de entorno.
+const TMDB_API_KEY = process.env.TMDB_API_KEY;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 if (!TMDB_API_KEY) console.error("❌ ERROR: La variable de entorno TMDB_API_KEY no está configurada.");
 if (!YOUTUBE_API_KEY) console.error("❌ ERROR: La variable de entorno YOUTUBE_API_KEY no está configurada.");
 
 
-// ------------------- GITHUB CONFIGURACIÓN DE RESPALDO (Usando variables de entorno) -------------------
-// Asegúrate de que estas variables estén configuradas en tu entorno de hosting (Secrets)
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
-const BACKUP_FILE_NAME = "users_data.json";
-
 // 📂 Archivos locales (Mantenidos)
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
-
 
 // ------------------- FUNCIONES AUXILIARES -------------------
 
@@ -40,8 +38,7 @@ function cleanPeliculaUrl(url) {
   if (!url) return url;
   // Reemplaza '/prepreview' con '/preview' para corregir el error en la URL de Google Drive (o similar).
   // El $1 asegura que se mantenga cualquier parámetro de consulta (?...) o hash (#...).
-  // Se hace case-insensitive por si acaso
-  return url.replace(/\/prepreview([?#]|$)/i, '/preview$1');
+  return url.replace(/\/prepreview([?#]|$)/, '/preview$1');
 }
 
 
@@ -84,7 +81,7 @@ async function saveUsersDataToGitHub(content) {
   try {
     const sha = await getFileSha(BACKUP_FILE_NAME);
     // Codificar el contenido en base64 para la API de GitHub
-    const contentBase64 = Buffer.from(content, 'utf8').toString('base64'); // Uso explícito de Buffer
+    const contentBase64 = Buffer.from(content).toString('base64'); 
     const commitMessage = `Automated backup: Update ${BACKUP_FILE_NAME} at ${new Date().toISOString()}`;
 
     const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
@@ -170,7 +167,6 @@ function ensureUsersFile() {
     const initialData = JSON.stringify({ users: {} }, null, 2);
     fs.writeFileSync(USERS_FILE, initialData);
     // Respaldo inicial a GitHub al crear el archivo
-    // No esperamos el resultado, es una operación en segundo plano
     saveUsersDataToGitHub(initialData); 
   }
 }
@@ -183,7 +179,6 @@ function writeUsersData(data) {
   fs.writeFileSync(USERS_FILE, content);
   
   // Realizar el respaldo a GitHub de forma asíncrona
-  // No esperamos el resultado
   saveUsersDataToGitHub(content); 
 }
 function getOrCreateUser(email) {
@@ -210,13 +205,11 @@ function saveUser(email, userObj) {
 
 // ------------------- CONTROL DE INACTIVIDAD -------------------
 let ultimaPeticion = Date.now();
-// Cambiado a 5 minutos (300 * 1000) por si el hosting necesita más tiempo para cerrar.
-// El original era muy agresivo para un hosting sin tráfico constante.
-const TIEMPO_INACTIVIDAD = 300 * 1000; 
+const TIEMPO_INACTIVIDAD = 60 * 1000;
 
 setInterval(async () => {
   if (Date.now() - ultimaPeticion >= TIEMPO_INACTIVIDAD) {
-    console.log("🕒 Sin tráfico por 5 minutos. Iniciando cierre y respaldo final...");
+    console.log("🕒 Sin tráfico por 1 minuto. Iniciando cierre y respaldo final...");
     
     try {
       // 1. Leer el estado final desde el archivo local
@@ -234,7 +227,7 @@ setInterval(async () => {
     // 3. Detener el proceso
     process.exit(0);
   }
-}, 30 * 1000); // Comprueba cada 30 segundos
+}, 30 * 1000);
 
 app.use((req, res, next) => {
   ultimaPeticion = Date.now();
@@ -274,7 +267,7 @@ app.get("/peliculas/:titulo", async (req, res) => {
 });
 
 // 🔎 Búsqueda avanzada
-app.get("/buscar", async (req, res) => { // Ahora async para poder usar el respaldo
+app.get("/buscar", (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
   let resultados = peliculas;
 
@@ -301,16 +294,6 @@ app.get("/buscar", async (req, res) => { // Ahora async para poder usar el respa
         parseInt(p.año) >= parseInt(desde) &&
         parseInt(p.año) <= parseInt(hasta)
     );
-    
-  // Si no hay resultados locales y hay un término de búsqueda (q), intentar con el respaldo
-  if (resultados.length === 0 && q) {
-      try {
-          const respaldo = await buscarPeliculaRespaldo(q);
-          if (respaldo) resultados.push(respaldo);
-      } catch (error) {
-          console.error("❌ Error al buscar respaldo en /buscar:", error.message);
-      }
-  }
 
   res.json({ total: resultados.length, resultados });
 });
@@ -345,8 +328,7 @@ app.get("/user/add_favorite", (req, res) => {
     return res.status(400).json({ error: "Faltan parámetros" });
 
   const user = getOrCreateUser(email);
-  // Usar la URL LIMPIA para verificar si ya existe
-  if (!user.favorites.some(f => cleanPeliculaUrl(f.pelicula_url) === pelicula_url)) { 
+  if (!user.favorites.some(f => f.pelicula_url === pelicula_url)) {
     user.favorites.unshift({ titulo, imagen_url, pelicula_url, addedAt: new Date().toISOString() });
     saveUser(email, user);
   }
@@ -359,6 +341,8 @@ app.get("/user/favorites", (req, res) => {
   const user = getOrCreateUser(email);
   res.json({ total: user.favorites.length, favorites: user.favorites });
 });
+
+// **NUEVAS RUTAS DE ELIMINACIÓN DE FAVORITOS (Añadido)**
 
 // ELIMINAR TODOS LOS FAVORITOS
 app.get("/user/favorites/clear", (req, res) => {
@@ -378,17 +362,17 @@ app.get("/user/favorites/clear", (req, res) => {
 app.get("/user/favorites/remove", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const raw_pelicula_url = req.query.pelicula_url;
-  const pelicula_url_clean = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL de entrada
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
   
-  if (!email || !pelicula_url_clean) 
+  if (!email || !pelicula_url) 
     return res.status(400).json({ error: "Faltan email o pelicula_url" });
   
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.favorites.length;
-  // Filtrar favoritos comparando la URL LIMPIA
-  user.favorites = user.favorites.filter(f => cleanPeliculaUrl(f.pelicula_url) !== pelicula_url_clean);
+  // Filtrar favoritos para excluir la película con esa URL
+  user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
   
   if (user.favorites.length < initialLength) {
     saveUser(email, user);
@@ -407,10 +391,6 @@ app.get("/user/add_history", (req, res) => {
     return res.status(400).json({ error: "Faltan parámetros" });
 
   const user = getOrCreateUser(email);
-  
-  // Eliminar cualquier entrada anterior con la misma URL limpia para evitar duplicados
-  user.history = user.history.filter(h => cleanPeliculaUrl(h.pelicula_url) !== pelicula_url);
-  
   user.history.unshift({ titulo, pelicula_url, imagen_url, fecha: new Date().toISOString() });
   if (user.history.length > 200) user.history = user.history.slice(0, 200);
   saveUser(email, user);
@@ -423,6 +403,8 @@ app.get("/user/history", (req, res) => {
   const user = getOrCreateUser(email);
   res.json({ total: user.history.length, history: user.history });
 });
+
+// **NUEVAS RUTAS DE ELIMINACIÓN DE HISTORIAL (Añadido)**
 
 // ELIMINAR TODO EL HISTORIAL
 app.get("/user/history/clear", (req, res) => {
@@ -442,17 +424,17 @@ app.get("/user/history/clear", (req, res) => {
 app.get("/user/history/remove", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const raw_pelicula_url = req.query.pelicula_url;
-  const pelicula_url_clean = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL de entrada
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
   
-  if (!email || !pelicula_url_clean) 
+  if (!email || !pelicula_url) 
     return res.status(400).json({ error: "Faltan email o pelicula_url" });
   
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.history.length;
-  // Filtrar el historial comparando la URL LIMPIA
-  user.history = user.history.filter(h => cleanPeliculaUrl(h.pelicula_url) !== pelicula_url_clean);
+  // Filtrar el historial para excluir la película con esa URL
+  user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
   
   if (user.history.length < initialLength) {
     saveUser(email, user);
@@ -481,19 +463,9 @@ app.get("/user/history/refresh", async (req, res) => {
     if (nueva) refreshed.push(nueva);
   }
 
-  // Si no se especificó un título, reemplazamos todo el historial
-  if (!titulo) {
-      // Mantenemos solo las propiedades clave para que coincidan con la estructura de historial
-      user.history = refreshed.map(r => ({
-          titulo: r.titulo,
-          pelicula_url: r.pelicula_url,
-          imagen_url: r.imagen_url,
-          fecha: new Date().toISOString() // Nueva fecha de actualización
-      }));
-  }
-  
+  if (!titulo) user.history = refreshed;
   saveUser(email, user);
-  res.json({ ok: true, refreshed: refreshed.length });
+  res.json({ ok: true, refreshed });
 });
 
 // 🔁 Refrescar favoritos (uno o todos)
@@ -513,19 +485,9 @@ app.get("/user/favorites/refresh", async (req, res) => {
     if (nueva) refreshed.push(nueva);
   }
 
-  // Si no se especificó un título, reemplazamos todos los favoritos
-  if (!titulo) {
-      // Mantenemos solo las propiedades clave para que coincidan con la estructura de favoritos
-      user.favorites = refreshed.map(r => ({
-          titulo: r.titulo,
-          pelicula_url: r.pelicula_url,
-          imagen_url: r.imagen_url,
-          addedAt: new Date().toISOString() // Nueva fecha de actualización
-      }));
-  }
-
+  if (!titulo) user.favorites = refreshed;
   saveUser(email, user);
-  res.json({ ok: true, refreshed: refreshed.length });
+  res.json({ ok: true, refreshed });
 });
 
 // 📊 Perfil con estadísticas
@@ -579,44 +541,30 @@ async function buscarPeliculaRespaldo(titulo) {
   try {
     const url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(titulo)}`;
     const resp = await fetch(url);
-    if (!resp.ok) {
-        console.error(`❌ Error TMDb Search (Status ${resp.status}): ${await resp.text()}`);
-        return null;
-    }
     const data = await resp.json();
     if (!data.results || data.results.length === 0) return null;
 
     const pelicula = data.results[0];
     const detallesUrl = `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
     const detallesResp = await fetch(detallesUrl);
-    if (!detallesResp.ok) {
-        console.error(`❌ Error TMDb Details (Status ${detallesResp.status}): ${await detallesResp.text()}`);
-        // Continúa sin detalles adicionales si fallan
-    }
-    const detalles = detallesResp.ok ? await detallesResp.json() : {};
+    const detalles = await detallesResp.json();
 
     // 🎯 Lógica para buscar la película completa en YouTube
     // Se utiliza "película completa" para asegurar un resultado que no sea un tráiler.
     const youtubeQuery = pelicula.title + " película completa español latino"; // Añadimos 'español latino' para mejorar la búsqueda
     const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
     const youtubeResp = await fetch(youtubeUrl);
-    
-    if (!youtubeResp.ok) {
-        console.error(`❌ Error YouTube Search (Status ${youtubeResp.status}): ${await youtubeResp.text()}`);
-        // Se puede retornar con la información de TMDb pero sin URL de película
-    }
-    
-    const youtubeData = youtubeResp.ok ? await youtubeResp.json() : {};
+    const youtubeData = await youtubeResp.json();
     const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
 
     return {
       titulo: pelicula.title,
-      descripcion: pelicula.overview || detalles.overview || "",
-      fecha_lanzamiento: pelicula.release_date || detalles.release_date || "",
-      idioma_original: pelicula.original_language || detalles.original_language || "",
+      descripcion: pelicula.overview || "",
+      fecha_lanzamiento: pelicula.release_date || "",
+      idioma_original: pelicula.original_language || "",
       puntuacion: pelicula.vote_average || 0,
       popularidad: pelicula.popularity || 0,
-      generos: detalles.genres?.map(g => g.name).join(", ") || pelicula.genre_ids?.map(id => `ID:${id}`).join(", ") || "",
+      generos: detalles.genres?.map(g => g.name).join(", ") || "",
       imagen_url: pelicula.poster_path
         ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
         : "",
@@ -625,7 +573,7 @@ async function buscarPeliculaRespaldo(titulo) {
       respaldo: true
     };
   } catch (err) {
-    console.error("❌ Excepción en TMDb o YouTube:", err.message);
+    console.error("❌ Error TMDb o YouTube:", err.message);
     return null;
   }
 }
@@ -641,3 +589,4 @@ async function startServer() {
 }
 
 startServer();
+

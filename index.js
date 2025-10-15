@@ -29,30 +29,6 @@ if (!YOUTUBE_API_KEY) console.error("❌ ERROR: La variable de entorno YOUTUBE_A
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
 
-// ------------------- DATOS DE APOYO DE RESPALDO -------------------
-
-// Mapeo de géneros para TMDb (simplificado en español)
-const TMDB_GENRES = {
-  accion: 28,
-  aventuras: 12,
-  animacion: 16,
-  comedia: 35,
-  crimen: 80,
-  documental: 99,
-  drama: 18,
-  familia: 10751,
-  fantasia: 14,
-  historia: 36,
-  terror: 27,
-  musica: 10402,
-  misterio: 9648,
-  romance: 10749,
-  ciencia_ficcion: 878,
-  thriller: 53,
-  guerra: 10752,
-  western: 37
-};
-
 // ------------------- FUNCIONES AUXILIARES -------------------
 
 /** Limpia la URL de la película eliminando la duplicidad '/prepreview' para corregir a '/preview'. */
@@ -63,69 +39,8 @@ function cleanPeliculaUrl(url) {
   return url.replace(/\/prepreview([?#]|$)/, '/preview$1');
 }
 
-/** Formatea un resultado de TMDb al formato de película local. */
-async function formatTmdbResult(pelicula) {
-  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) return null;
-
-  try {
-    // 1. Obtener detalles para los géneros
-    const detallesUrl = `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
-    const detallesResp = await fetch(detallesUrl);
-    const detalles = await detallesResp.json();
-
-    // 2. Buscar URL de película completa en YouTube
-    const youtubeQuery = pelicula.title + " película completa español latino";
-    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
-    const youtubeResp = await fetch(youtubeUrl);
-    const youtubeData = await youtubeResp.json();
-    const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-
-    return {
-      titulo: pelicula.title,
-      descripcion: pelicula.overview || "",
-      fecha_lanzamiento: pelicula.release_date || "",
-      idioma_original: pelicula.original_language || "",
-      puntuacion: pelicula.vote_average || 0,
-      popularidad: pelicula.popularity || 0,
-      generos: detalles.genres?.map(g => g.name).join(", ") || "",
-      imagen_url: pelicula.poster_path
-        ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
-        : "",
-      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
-      respaldo: true
-    };
-  } catch (err) {
-    console.error("❌ Error al obtener detalles o YouTube en formato de respaldo:", err.message);
-    return null;
-  }
-}
-
-/** Formatea MÚLTIPLES resultados de TMDb al formato local, SIN buscar detalles o YouTube (para evitar demoras). */
-function formatTmdbSimpleResult(result, allGenres) {
-  const genreNames = (result.genre_ids || [])
-    .map(id => allGenres.find(g => g.id === id)?.name)
-    .filter(Boolean)
-    .join(", ");
-
-  return {
-    titulo: result.title,
-    descripcion: result.overview || "",
-    fecha_lanzamiento: result.release_date || "",
-    idioma_original: result.original_language || "",
-    puntuacion: result.vote_average || 0,
-    popularidad: result.popularity || 0,
-    generos: genreNames || "No disponible (Respaldo)",
-    imagen_url: result.poster_path
-      ? `https://image.tmdb.org/t/p/w500${result.poster_path}`
-      : "",
-    pelicula_url: null, // No se busca URL de YouTube para búsquedas avanzadas
-    respaldo: true
-  };
-}
-
 
 // ------------------- FUNCIONES DE GITHUB -------------------
-// ... (Funciones getFileSha, saveUsersDataToGitHub, loadUsersDataFromGitHub sin cambios) ...
 
 /** Obtiene el SHA de la última versión del archivo en GitHub, necesario para actualizar. */
 async function getFileSha(filePath) {
@@ -232,6 +147,7 @@ async function loadUsersDataFromGitHub() {
   }
 }
 
+
 // ------------------- CARGAR PELÍCULAS -------------------
 let peliculas = [];
 try {
@@ -243,7 +159,6 @@ try {
 }
 
 // ------------------- FUNCIONES DE USUARIOS -------------------
-// ... (Funciones de usuarios sin cambios) ...
 function ensureUsersFile() {
   if (!fs.existsSync(USERS_FILE)) {
     console.log(`ℹ️ Creando archivo local: ${BACKUP_FILE_NAME}`);
@@ -285,7 +200,6 @@ function saveUser(email, userObj) {
   data.users[email] = userObj;
   writeUsersData(data);
 }
-
 
 // ------------------- CONTROL DE INACTIVIDAD -------------------
 let ultimaPeticion = Date.now();
@@ -329,12 +243,9 @@ app.get("/", (req, res) => {
 
 app.get("/peliculas", (req, res) => res.json(peliculas));
 
-// RUTA MODIFICADA: Búsqueda por título con respaldo
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
-  
-  // 1. Búsqueda Local
   const resultado = peliculas.filter(p =>
     (p.titulo || "").toLowerCase().includes(titulo)
   );
@@ -342,25 +253,24 @@ app.get("/peliculas/:titulo", async (req, res) => {
   if (resultado.length > 0)
     return res.json({ fuente: "local", resultados: resultado });
 
-  // 2. Búsqueda de Respaldo
   console.log(`🔎 No se encontró "${tituloRaw}" en el JSON. Buscando respaldo...`);
   try {
     const respaldo = await buscarPeliculaRespaldo(tituloRaw);
     if (respaldo) return res.json({ fuente: "respaldo", resultados: [respaldo] });
-    else return res.json({ fuente: "local_y_respaldo", resultados: [] }); // Devolver resultados vacíos si no hay nada
+    else return res.status(404).json({ error: "Película no encontrada en respaldo." });
   } catch (error) {
     console.error("❌ Error al buscar respaldo:", error);
-    // Devolver resultados vacíos si hay un error en el respaldo
-    res.json({ fuente: "error_respaldo", resultados: [] }); 
+    res.status(500).json({ error: "Error al consultar respaldo externo." });
   }
 });
 
-// 🔎 RUTA MODIFICADA: Búsqueda avanzada con respaldo
-app.get("/buscar", async (req, res) => { // Ahora es async
+// 🔎 Búsqueda avanzada
+app.get("/buscar", async (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
   let resultados = peliculas;
-
-  // 1. Búsqueda Local
+  const queryOptions = { año, genero, idioma, desde, hasta };
+  
+  // 1. Búsqueda local (Existente)
   if (q) {
     const ql = q.toLowerCase();
     resultados = resultados.filter(p =>
@@ -369,6 +279,7 @@ app.get("/buscar", async (req, res) => { // Ahora es async
     );
   }
 
+  // Filtrado avanzado local (Existente)
   if (año) resultados = resultados.filter(p => String(p.año) === String(año));
   if (genero)
     resultados = resultados.filter(p =>
@@ -384,29 +295,60 @@ app.get("/buscar", async (req, res) => { // Ahora es async
         parseInt(p.año) >= parseInt(desde) &&
         parseInt(p.año) <= parseInt(hasta)
     );
-        
+
   if (resultados.length > 0) {
     return res.json({ fuente: "local", total: resultados.length, resultados });
   }
 
-  // 2. Fallback a Respaldo TMDb
-  console.log("🔎 Búsqueda local sin resultados. Usando respaldo TMDb...");
+  // 2. Respaldo TMDb si no hay resultados locales (NUEVA FUNCIONALIDAD)
+  console.log("🔎 No se encontraron resultados locales. Buscando respaldo en TMDb...");
+  
   try {
-    const backupResults = await buscarPeliculasRespaldoGenerico(req.query);
-    return res.json({ 
-      fuente: "respaldo", 
-      total: backupResults.length, 
-      resultados: backupResults 
-    });
+    // Se usa 'q' para búsqueda por nombre/descripción, o 'queryOptions' para búsqueda avanzada.
+    const resultadosRespaldo = await searchTMDB(q, queryOptions);
+    
+    if (resultadosRespaldo.length > 0) {
+      return res.json({ 
+        fuente: "respaldo", 
+        total: resultadosRespaldo.length, 
+        resultados: resultadosRespaldo 
+      });
+    }
+
+    // Si no hay resultados, devolver total: 0.
+    return res.status(200).json({ fuente: "local", total: 0, resultados: [] });
+    
   } catch (error) {
-    console.error("❌ Error al buscar respaldo en /buscar:", error.message);
-    // Si falla el respaldo, devolvemos resultados vacíos para cumplir con "siempre debe de haber resultados"
-    return res.json({ fuente: "error_respaldo", total: 0, resultados: [] });
+    console.error("❌ Error al buscar en el respaldo TMDb:", error);
+    res.status(500).json({ error: "Error al consultar respaldo externo." });
   }
 });
 
+// **NUEVO ENDPOINT** - Obtener detalles de la película (tipo MaguisTV) por ID de TMDb
+app.get("/peliculas/details/:tmdb_id", async (req, res) => {
+  const tmdb_id = req.params.tmdb_id;
+  if (!tmdb_id) return res.status(400).json({ error: "Falta el parámetro tmdb_id" });
+
+  try {
+    // Usamos una lógica similar a buscarPeliculaRespaldo para obtener los detalles completos y la URL de YouTube.
+    // El segundo parámetro (título) es un placeholder ya que la función puede obtenerlo con el ID.
+    const resultado = await buscarDetallesYTrailerTMDb(tmdb_id); 
+    
+    if (resultado) {
+      // El resultado ya está en el formato completo con la URL de YouTube (pelicula_url)
+      return res.json({ fuente: "respaldo", resultados: [resultado] });
+    }
+    
+    return res.status(404).json({ error: "Detalles de película no encontrados en respaldo." });
+    
+  } catch (error) {
+    console.error("❌ Error al buscar detalles por ID en respaldo:", error);
+    res.status(500).json({ error: "Error al consultar respaldo externo para detalles." });
+  }
+});
+
+
 // ------------------- RUTAS DE USUARIOS -------------------
-// ... (Rutas de usuarios sin cambios) ...
 app.get("/user/get", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta parámetro email" });
@@ -553,7 +495,6 @@ app.get("/user/history/remove", (req, res) => {
 
 
 // ------------------- NUEVOS ENDPOINTS -------------------
-// ... (Rutas de refresh y perfil sin cambios, usan buscarPeliculaRespaldo) ...
 
 // 🔁 Refrescar historial (uno o todos)
 app.get("/user/history/refresh", async (req, res) => {
@@ -640,10 +581,57 @@ app.get("/user/activity", (req, res) => {
   res.json({ total: actividad.length, actividad });
 });
 
-
 // ------------------- RESPALDO TMDb + YouTube -------------------
 
-/** Busca UNA película por título exacto en TMDb y la URL en YouTube. (Usado por /peliculas/:titulo y refresh) */
+/**
+ * Función auxiliar para obtener detalles de TMDb y el tráiler de YouTube.
+ * Esta se usa internamente por `buscarPeliculaRespaldo` y el nuevo endpoint `/peliculas/details/:tmdb_id`.
+ */
+async function buscarDetallesYTrailerTMDb(tmdb_id) {
+  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
+    console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
+    return null;
+  }
+  
+  try {
+    // 1. Obtener detalles extendidos
+    const detallesUrl = `https://api.themoviedb.org/3/movie/${tmdb_id}?api_key=${TMDB_API_KEY}&language=es-ES`;
+    const detallesResp = await fetch(detallesUrl);
+    const detalles = await detallesResp.json();
+
+    if (!detalles || detalles.success === false) return null;
+    
+    // 2. Buscar tráiler/película completa en YouTube
+    const youtubeQuery = detalles.title + " película completa español latino";
+    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
+    const youtubeResp = await fetch(youtubeUrl);
+    const youtubeData = await youtubeResp.json();
+    const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+
+    return {
+      titulo: detalles.title,
+      descripcion: detalles.overview || "",
+      fecha_lanzamiento: detalles.release_date || "",
+      idioma_original: detalles.original_language || "",
+      puntuacion: detalles.vote_average || 0,
+      popularidad: detalles.popularity || 0,
+      generos: detalles.genres?.map(g => g.name).join(", ") || "",
+      imagen_url: detalles.poster_path
+        ? `https://image.tmdb.org/t/p/w500${detalles.poster_path}`
+        : "",
+      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null, 
+      tmdb_id: detalles.id, // Se añade el ID de TMDb
+      respaldo: true
+    };
+  } catch (err) {
+    console.error(`❌ Error TMDb o YouTube al obtener detalles para ID ${tmdb_id}:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Búsqueda de una sola película por título en TMDb (Mantiene la función original).
+ */
 async function buscarPeliculaRespaldo(titulo) {
   if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
       console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
@@ -658,8 +646,8 @@ async function buscarPeliculaRespaldo(titulo) {
 
     const pelicula = data.results[0];
     
-    // Usamos el helper para obtener todos los detalles y el link de YouTube
-    return await formatTmdbResult(pelicula);
+    // Se reutiliza la nueva función auxiliar
+    return await buscarDetallesYTrailerTMDb(pelicula.id);
 
   } catch (err) {
     console.error("❌ Error TMDb o YouTube:", err.message);
@@ -667,73 +655,88 @@ async function buscarPeliculaRespaldo(titulo) {
   }
 }
 
-/** Busca MÚLTIPLES películas por criterios avanzados en TMDb. (Usado por /buscar) */
-async function buscarPeliculasRespaldoGenerico(params) {
-  if (!TMDB_API_KEY) {
+/**
+ * **NUEVA FUNCIÓN** - Realiza búsquedas generales o avanzadas en TMDb.
+ */
+async function searchTMDB(query, options = {}) {
+    if (!TMDB_API_KEY) {
       console.error("❌ No se puede usar el respaldo: Falta TMDB_API_KEY.");
       return [];
-  }
-  
-  let url = '';
-  let finalResults = [];
-  
-  try {
-    const genreResp = await fetch(`https://api.themoviedb.org/3/genre/movie/list?api_key=${TMDB_API_KEY}&language=es-ES`);
-    const genreData = await genreResp.json();
-    const allGenres = genreData.genres || [];
-
-    if (params.q) {
-      // 1. Búsqueda por consulta de texto (título o descripción)
-      const query = encodeURIComponent(params.q);
-      url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${query}&page=1`;
-    } else if (params.genero || params.año || (params.desde && params.hasta)) {
-      // 2. Búsqueda por descubrimiento (filtros avanzados)
-      let discoverParams = '';
-      
-      if (params.genero) {
-        // Encontrar ID del género
-        const generoKey = String(params.genero).toLowerCase().replace(/\s/g, '_');
-        const genreId = TMDB_GENRES[generoKey];
-        if (genreId) {
-          discoverParams += `&with_genres=${genreId}`;
-        } else {
-           console.log(`⚠️ Género ${params.genero} no encontrado en el mapa TMDB_GENRES.`);
-        }
-      }
-
-      if (params.año) {
-        discoverParams += `&primary_release_year=${params.año}`;
-      } else if (params.desde && params.hasta) {
-        discoverParams += `&primary_release_date.gte=${params.desde}-01-01&primary_release_date.lte=${params.hasta}-12-31`;
-      }
-      
-      if (params.idioma) {
-          // Nota: TMDb usa códigos ISO 639-1 (por ejemplo, 'es', 'en')
-          // Asumimos que el usuario pasa un código de idioma válido o un nombre común
-          const langCode = String(params.idioma).toLowerCase().slice(0, 2); 
-          discoverParams += `&with_original_language=${langCode}`; 
-      }
-
-      url = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=es-ES&sort_by=popularity.desc&page=1${discoverParams}`;
-    } else {
-        // Si no hay parámetros de búsqueda válidos, busca populares como fallback final
-        url = `https://api.themoviedb.org/3/movie/popular?api_key=${TMDB_API_KEY}&language=es-ES&page=1`;
     }
 
-    const resp = await fetch(url);
-    const data = await resp.json();
+    let apiUrl = "";
+    // Mapeo básico de géneros (solo se necesita para búsqueda avanzada de TMDb)
+    const tmdbGenreMap = {
+        accion: 28, aventuras: 12, animacion: 16, comedia: 35, crimen: 80,
+        documental: 99, drama: 18, familia: 10751, fantasia: 14, historia: 36,
+        terror: 27, musica: 10402, misterio: 9648, romance: 10749, cienciaficcion: 878,
+        tv: 10770, thriller: 53, guerra: 10752, western: 37
+    };
     
-    if (data.results && data.results.length > 0) {
-      // Mapear los resultados de TMDb al formato local simplificado
-      finalResults = data.results.map(r => formatTmdbSimpleResult(r, allGenres));
+    const { año, genero, idioma, desde, hasta } = options;
+    const genreId = genero ? tmdbGenreMap[genero.toLowerCase()] : null;
+
+    if (query) {
+      // Búsqueda por palabra clave (título o descripción) - Usa /search/movie
+      apiUrl = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(query)}`;
+    } else {
+      // Búsqueda avanzada/descubrimiento - Usa /discover/movie
+      apiUrl = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=es-ES&sort_by=popularity.desc&include_adult=false&include_video=false&page=1`;
+      
+      if (año) {
+          apiUrl += `&primary_release_year=${año}`;
+      } else if (desde && hasta) {
+          // Busca en el rango de fechas de lanzamiento
+          apiUrl += `&primary_release_date.gte=${desde}-01-01&primary_release_date.lte=${hasta}-12-31`;
+      }
+
+      if (genreId) {
+          apiUrl += `&with_genres=${genreId}`;
+      }
+      
+      if (idioma) {
+          // TMDB usa códigos ISO 639-1 (ej: es, en, fr)
+          apiUrl += `&with_original_language=${idioma.toLowerCase().split('-')[0]}`;
+      }
+      
+      // Filtros adicionales para obtener mejores resultados
+      apiUrl += `&vote_count.gte=10`; 
     }
+    
+    if (!apiUrl) return [];
 
-    return finalResults;
+    try {
+      const resp = await fetch(apiUrl);
+      const data = await resp.json();
+      
+      if (!data.results || data.results.length === 0) return [];
 
-  } catch (err) {
-    console.error("❌ Error en búsqueda avanzada de TMDb:", err.message);
-    return [];
-  }
+      // Formatear resultados
+      const formattedResults = data.results.filter(p => p.poster_path).map(p => ({
+        titulo: p.title,
+        descripcion: p.overview || "",
+        año: p.release_date ? p.release_date.substring(0, 4) : null,
+        idioma_original: p.original_language || "",
+        puntuacion: p.vote_average || 0,
+        popularidad: p.popularity || 0,
+        // En búsqueda avanzada, solo se devuelven IDs.
+        generos: p.genre_ids.join(", ") || "", 
+        imagen_url: p.poster_path
+          ? `https://image.tmdb.org/t/p/w500${p.poster_path}`
+          : "",
+        tmdb_id: p.id,
+        // No se obtiene la URL de YouTube en esta búsqueda masiva para optimizar el rendimiento.
+        pelicula_url: null, 
+        respaldo: true
+      }));
+      
+      // Devolver hasta 20 resultados
+      return formattedResults.slice(0, 20); 
+
+    } catch (err) {
+      console.error("❌ Error en la búsqueda general de TMDb:", err.message);
+      return [];
+    }
 }
 
 

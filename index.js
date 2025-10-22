@@ -238,10 +238,17 @@ function getOrCreateUser(email) {
       credits: 0,
       favorites: [],
       history: [],
-      resume: {}
+      resume: {},
+      // 🆕 Campo para la limpieza de actividad
+      lastActivityTimestamp: new Date().toISOString() 
     };
     writeUsersData(data);
   }
+  
+  // Asegurar que el campo resume y lastActivityTimestamp existen en usuarios antiguos
+  if (!data.users[email].resume) data.users[email].resume = {};
+  if (!data.users[email].lastActivityTimestamp) data.users[email].lastActivityTimestamp = new Date().toISOString();
+  
   return data.users[email];
 }
 function saveUser(email, userObj) {
@@ -250,7 +257,7 @@ function saveUser(email, userObj) {
   writeUsersData(data);
 }
 
-// ------------------- CONTROL DE INACTIVIDAD -------------------
+// ------------------- CONTROL DE INACTIVIDAD DEL SERVIDOR -------------------
 let ultimaPeticion = Date.now();
 const TIEMPO_INACTIVIDAD = 60 * 1000;
 
@@ -280,6 +287,69 @@ app.use((req, res, next) => {
   ultimaPeticion = Date.now();
   next();
 });
+
+
+// ------------------- TAREA PROGRAMADA: ELIMINACIÓN DE ACTIVIDAD CADA 24 HRS -------------------
+/** * Tarea programada para limpiar historial y resumen de películas 
+ * que tienen más de 24 horas de la última actividad/latido.
+ */
+const MS_IN_24_HOURS = 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+    console.log("🧹 Iniciando chequeo de limpieza de actividad de 24 horas...");
+    const data = readUsersData();
+    let usersModified = false;
+    const now = Date.now();
+
+    for (const email in data.users) {
+        const user = data.users[email];
+        let userActivityModified = false;
+
+        // --- Limpieza de Historial ---
+        const historyLengthBefore = user.history.length;
+        user.history = user.history.filter(h => {
+            const historyDate = new Date(h.fecha).getTime();
+            // Mantener solo lo que fue agregado en las últimas 24 horas
+            return now - historyDate < MS_IN_24_HOURS;
+        });
+        if (user.history.length !== historyLengthBefore) {
+            console.log(`   [${email}] Historial: Eliminados ${historyLengthBefore - user.history.length} elementos por antigüedad (>24h).`);
+            userActivityModified = true;
+        }
+
+        // --- Limpieza de Resumen de Reproducción ---
+        const resumeKeysBefore = Object.keys(user.resume).length;
+        const newResume = {};
+        for (const url in user.resume) {
+            const resumeEntry = user.resume[url];
+            const lastHeartbeatDate = new Date(resumeEntry.lastHeartbeat).getTime();
+            // Mantener solo lo que tuvo un latido en las últimas 24 horas
+            if (now - lastHeartbeatDate < MS_IN_24_HOURS) {
+                newResume[url] = resumeEntry;
+            }
+        }
+        user.resume = newResume;
+        const resumeKeysAfter = Object.keys(user.resume).length;
+        
+        if (resumeKeysAfter !== resumeKeysBefore) {
+            console.log(`   [${email}] Resumen: Eliminados ${resumeKeysBefore - resumeKeysAfter} elementos por inactividad (>24h).`);
+            userActivityModified = true;
+        }
+
+        if (userActivityModified) {
+            usersModified = true;
+        }
+    }
+
+    if (usersModified) {
+        writeUsersData(data);
+        console.log("✅ Limpieza de actividad completada y datos guardados.");
+    } else {
+        console.log("ℹ️ No se encontraron actividades para limpiar.");
+    }
+
+}, MS_IN_24_HOURS); // Ejecutar cada 24 horas
+
 
 // ------------------- RUTAS PRINCIPALES -------------------
 app.get("/", (req, res) => {
@@ -656,6 +726,8 @@ app.get("/user/profile", (req, res) => {
     totalHistorial: user.history.length,
     ultimaActividad:
       user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
+    // 🆕 Incluir información de la última actividad del latido
+    ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos", 
   };
   res.json({ perfil });
 });
@@ -676,11 +748,147 @@ app.get("/user/activity", (req, res) => {
     titulo: f.titulo,
     fecha: f.addedAt
   }));
-  const actividad = [...historial, ...favoritos].sort(
+  
+  // 🆕 Incluir actividad de resumen de reproducción
+  const resumen = Object.values(user.resume).map(r => ({
+    tipo: "reproduccion_resumen",
+    titulo: r.titulo,
+    fecha: r.lastHeartbeat,
+    progreso: `${Math.round((r.currentTime / r.totalDuration) * 100)}%`,
+    vistaCompleta: r.isComplete,
+  }));
+  
+  const actividad = [...historial, ...favoritos, ...resumen].sort(
     (a, b) => new Date(b.fecha) - new Date(a.fecha)
   );
 
   res.json({ total: actividad.length, actividad });
+});
+
+
+// ------------------- NUEVOS ENDPOINTS DE SEGUIMIENTO DE STREAMING (LATIDOS) -------------------
+
+/**
+ * 🆕 Sistema de seguimiento de latidos (heartbeat) para el progreso de streaming.
+ * @param email - Correo del usuario.
+ * @param pelicula_url - URL de la película (como clave única).
+ * @param titulo - Título de la película.
+ * @param currentTime - Tiempo actual de reproducción (en segundos).
+ * @param totalDuration - Duración total de la película (en segundos).
+ */
+app.get("/user/heartbeat", (req, res) => {
+    const email = (req.query.email || "").toLowerCase();
+    const raw_pelicula_url = req.query.pelicula_url;
+    const currentTime = parseInt(req.query.currentTime);
+    const totalDuration = parseInt(req.query.totalDuration);
+    const titulo = req.query.titulo;
+
+    const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+    
+    if (!email || !pelicula_url || isNaN(currentTime) || isNaN(totalDuration) || !titulo) {
+        return res.status(400).json({ error: "Faltan parámetros válidos (email, pelicula_url, currentTime, totalDuration, titulo)." });
+    }
+    
+    const user = getOrCreateUser(email);
+    user.lastActivityTimestamp = new Date().toISOString(); // Actualiza la actividad global del usuario
+
+    // 🔑 Clave única para el resumen de reproducción
+    const key = pelicula_url;
+
+    // Calcula el porcentaje visto
+    const percentage = (currentTime / totalDuration) * 100;
+
+    // Umbral para considerar "vista completa" (por ejemplo, 90%)
+    const IS_COMPLETE_THRESHOLD = 90; 
+    const isComplete = percentage >= IS_COMPLETE_THRESHOLD;
+    
+    // Almacenar/actualizar el resumen de la reproducción
+    user.resume[key] = {
+        titulo: titulo,
+        pelicula_url: pelicula_url,
+        currentTime: currentTime,
+        totalDuration: totalDuration,
+        percentage: Math.round(percentage),
+        isComplete: isComplete,
+        lastHeartbeat: new Date().toISOString()
+    };
+    
+    saveUser(email, user);
+    
+    res.json({ 
+        ok: true, 
+        message: "Latido registrado.", 
+        progress: user.resume[key] 
+    });
+});
+
+/**
+ * 🆕 Endpoint para verificar si una película ha sido vista y consumir 1 crédito.
+ * Solo consume el crédito si el plan es 'creditos' y la película está marcada como 'vista completa' 
+ * en el resumen de reproducción (isComplete: true).
+ * @param email - Correo del usuario.
+ * @param pelicula_url - URL de la película.
+ */
+app.get("/user/consume_credit", (req, res) => {
+    const email = (req.query.email || "").toLowerCase();
+    const raw_pelicula_url = req.query.pelicula_url;
+    const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+
+    if (!email || !pelicula_url) {
+        return res.status(400).json({ error: "Faltan parámetros (email, pelicula_url)." });
+    }
+
+    const user = getOrCreateUser(email);
+
+    if (user.tipoPlan !== 'creditos') {
+        return res.json({ 
+            ok: true, 
+            consumed: false, 
+            message: `El plan del usuario es '${user.tipoPlan}', no se requiere consumo de crédito.` 
+        });
+    }
+
+    const resumeEntry = user.resume[pelicula_url];
+
+    if (!resumeEntry) {
+        return res.status(404).json({ 
+            ok: false, 
+            consumed: false, 
+            message: "No se encontró el resumen de reproducción para esta película." 
+        });
+    }
+
+    if (!resumeEntry.isComplete) {
+        return res.json({ 
+            ok: false, 
+            consumed: false, 
+            progress: resumeEntry.percentage, 
+            message: "La película no ha sido vista completamente (requiere >90%)." 
+        });
+    }
+
+    if (user.credits <= 0) {
+        return res.json({ 
+            ok: false, 
+            consumed: false, 
+            message: "Créditos insuficientes." 
+        });
+    }
+
+    // 1. Consumir el crédito
+    user.credits -= 1;
+    
+    // 2. Marcar el resumen como "crédito consumido" para evitar doble cobro
+    resumeEntry.creditConsumed = true; 
+    
+    saveUser(email, user);
+
+    res.json({ 
+        ok: true, 
+        consumed: true, 
+        remaining_credits: user.credits, 
+        message: "Crédito consumido exitosamente. La película se marcó como vista completa." 
+    });
 });
 
 // ------------------- RESPALDO TMDb + YouTube (BUSQUEDA DE UNA SOLA PELICULA) -------------------

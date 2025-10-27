@@ -2,6 +2,7 @@
 // ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
 // 🔥 SOLUCIÓN: La búsqueda avanzada y por categoría AHORA DEVUELVE resultados de TMDb incluso sin enlace directo de YouTube, 
 // lo que asegura que las categorías siempre carguen contenido.
+// 🟢 CORRECCIÓN: Se optimiza la búsqueda de YouTube y se utiliza la URL de incrustación (embed) para una mejor compatibilidad con reproductores.
 
 import express from "express";
 import cors from "cors";
@@ -888,11 +889,51 @@ app.get("/user/consume_credit", (req, res) => {
     });
 });
 
-// ------------------- RESPALDO TMDb + YouTube (BUSQUEDA DE UNA SOLA PELICULA) -------------------
+// ------------------- FUNCIONES DE RESPALDO: TMDb + YouTube -------------------
+
+/**
+ * 🆕 Función auxiliar: Busca un video en YouTube basado en una lista de queries.
+ * @param {string} movieTitle - Título de la película.
+ * @param {string} releaseYear - Año de lanzamiento (opcional).
+ * @returns {string | null} El ID de YouTube del video encontrado o null.
+ */
+async function buscarYoutubeMovieLink(movieTitle, releaseYear = '') {
+    if (!YOUTUBE_API_KEY) return null;
+
+    // 💡 Estrategia: Probar con diferentes términos de búsqueda
+    const searchQueries = [
+        `${movieTitle} ${releaseYear} película completa español latino`,
+        `${movieTitle} película completa español latino`,
+        `${movieTitle} trailer oficial español` // Si no se encuentra la película completa, se devuelve el tráiler.
+    ];
+
+    for (const query of searchQueries) {
+        try {
+            const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1&videoEmbeddable=true`;
+            const resp = await fetch(youtubeUrl);
+            const data = await resp.json();
+            
+            const youtubeId = data.items?.[0]?.id?.videoId || null;
+            
+            if (youtubeId) {
+                console.log(`✅ YouTube: Encontrado resultado con query: ${query}`);
+                // 🟢 CORRECCIÓN CLAVE: Devolver la URL de incrustación (embed) de YouTube
+                return `https://www.youtube.com/embed/${youtubeId}`; 
+            }
+        } catch (err) {
+            console.error(`❌ Error en búsqueda de YouTube con query "${query}":`, err.message);
+            // Continuar con el siguiente query si hay un error de red o API
+        }
+    }
+
+    console.log("⚠️ YouTube: No se encontró un enlace de película o tráiler compatible.");
+    return null;
+}
+
 // NOTA: Esta función se usa para un solo resultado detallado (Ej. /peliculas/Titulo).
 async function buscarPeliculaRespaldo(titulo) {
-  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
-      console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
+  if (!TMDB_API_KEY) {
+      console.error("❌ No se puede usar el respaldo: Falta la clave TMDB_API_KEY.");
       return null;
   }
   
@@ -906,24 +947,10 @@ async function buscarPeliculaRespaldo(titulo) {
     const detallesUrl = `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
     const detallesResp = await fetch(detallesUrl);
     const detalles = await detallesResp.json();
-
-    // 🎯 Lógica para buscar la película completa en YouTube
-    // Se mejoran los términos de búsqueda para ser más amplios, si el primero falla.
     
-    // Intento 1: "película completa español latino"
-    let youtubeQuery = `${pelicula.title} película completa español latino`; 
-    let youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
-    let youtubeData = await youtubeResp.json();
-    let youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-
-    // Intento 2: Si el primero falla, probar solo "película completa"
-    if (!youtubeId) {
-        youtubeQuery = `${pelicula.title} película completa`;
-        youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
-        youtubeData = await youtubeResp.json();
-        youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-    }
-    // Fin de la mejora en la búsqueda de YouTube.
+    const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
+    // 🟢 Uso de la nueva función auxiliar de YouTube
+    const pelicula_url = await buscarYoutubeMovieLink(pelicula.title, year); 
 
     return {
       titulo: pelicula.title,
@@ -936,19 +963,18 @@ async function buscarPeliculaRespaldo(titulo) {
       imagen_url: pelicula.poster_path
         ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
         : "",
-      // Si se encuentra en YouTube, se usa su URL, si no, es null.
-      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null, 
+      pelicula_url: pelicula_url, // URL de incrustación de YouTube o null
       respaldo: true
     };
   } catch (err) {
-    console.error("❌ Error TMDb o YouTube:", err.message);
+    console.error("❌ Error TMDb:", err.message);
     return null;
   }
 }
 
 // 🆕 NUEVA FUNCIÓN: Búsqueda general en TMDb (para listas/avanzada/categorías)
 async function searchTMDb(params) {
-    if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
+    if (!TMDB_API_KEY) {
         return [];
     }
     
@@ -982,18 +1008,18 @@ async function searchTMDb(params) {
         const resultsToEnrich = data.results.slice(0, 10); 
         const enrichedResults = [];
 
-        for (const pelicula of resultsToEnrich) {
-            if (!pelicula.title) continue; 
-            
-            // Lógica para buscar YouTube (se mantiene, pero el resultado de TMDb se devuelve siempre)
+        // Usaremos Promise.all para hacer las búsquedas de YouTube en paralelo y no ralentizar la respuesta
+        const youtubePromises = resultsToEnrich.map(pelicula => {
             const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
-            const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Usamos la misma query optimizada
-            const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
+            return buscarYoutubeMovieLink(pelicula.title, year);
+        });
+        
+        const youtubeUrls = await Promise.all(youtubePromises);
+
+        resultsToEnrich.forEach((pelicula, index) => {
+            if (!pelicula.title) return; 
             
-            // Ejecutar la búsqueda de YouTube SIN esperar
-            const youtubeResp = await fetch(youtubeUrl);
-            const youtubeData = await youtubeResp.json();
-            const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+            const pelicula_url = youtubeUrls[index]; // URL de incrustación de YouTube o null
             
             // Reutilizar la estructura de datos del local
             enrichedResults.push({
@@ -1007,13 +1033,12 @@ async function searchTMDb(params) {
                     ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
                     : "",
                 // 🔥 PUNTO CLAVE: El enlace de YouTube es opcional (puede ser null).
-                pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
+                pelicula_url: pelicula_url,
                 respaldo: true
             });
-        }
+        });
 
         // 🔥 MODIFICACIÓN: Devolver TODOS los resultados enriquecidos de TMDb. 
-        // Si no se encontró el enlace de YouTube, se devuelve la película con pelicula_url: null.
         return enrichedResults; 
 
     } catch (err) {

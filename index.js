@@ -3,6 +3,7 @@
 // 🔥 SOLUCIÓN: La búsqueda avanzada y por categoría AHORA DEVUELVE resultados de TMDb incluso sin enlace directo de YouTube, 
 // lo que asegura que las categorías siempre carguen contenido.
 // 🟢 CORRECCIÓN: Se optimiza la búsqueda de YouTube y se utiliza la URL de incrustación (embed) para una mejor compatibilidad con reproductores.
+// 🎥 MEJORA: Se garantiza la carga del tráiler para evitar 'null' en pelicula_url.
 
 import express from "express";
 import cors from "cors";
@@ -892,42 +893,58 @@ app.get("/user/consume_credit", (req, res) => {
 // ------------------- FUNCIONES DE RESPALDO: TMDb + YouTube -------------------
 
 /**
+ * Función auxiliar para buscar un video incrustable de YouTube.
+ * * @param {string} query - El término de búsqueda para YouTube.
+ * @returns {string | null} La URL de incrustación de YouTube o null si no se encuentra.
+ */
+async function fetchYoutubeEmbedUrl(query) {
+    try {
+        const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1&videoEmbeddable=true`;
+        const resp = await fetch(youtubeUrl);
+        const data = await resp.json();
+        
+        const youtubeId = data.items?.[0]?.id?.videoId || null;
+        
+        if (youtubeId) {
+            return `https://www.youtube.com/embed/${youtubeId}`; 
+        }
+    } catch (err) {
+        console.error(`❌ Error en búsqueda de YouTube con query "${query}":`, err.message);
+    }
+    return null;
+}
+
+
+/**
  * 🆕 Función auxiliar: Busca un video en YouTube basado en una lista de queries.
  * @param {string} movieTitle - Título de la película.
  * @param {string} releaseYear - Año de lanzamiento (opcional).
- * @returns {string | null} El ID de YouTube del video encontrado o null.
+ * @returns {string | null} La URL de incrustación de YouTube (película completa o tráiler) o null.
  */
 async function buscarYoutubeMovieLink(movieTitle, releaseYear = '') {
     if (!YOUTUBE_API_KEY) return null;
 
-    // 💡 Estrategia: Probar con diferentes términos de búsqueda
-    const searchQueries = [
-        `${movieTitle} ${releaseYear} película completa español latino`,
-        `${movieTitle} película completa español latino`,
-        `${movieTitle} trailer oficial español` // Si no se encuentra la película completa, se devuelve el tráiler.
-    ];
+    // --- 1. INTENTAR BUSCAR PELÍCULA COMPLETA ---
+    const fullMovieQuery = `${movieTitle} ${releaseYear} película completa español latino`;
+    let pelicula_url = await fetchYoutubeEmbedUrl(fullMovieQuery);
 
-    for (const query of searchQueries) {
-        try {
-            const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1&videoEmbeddable=true`;
-            const resp = await fetch(youtubeUrl);
-            const data = await resp.json();
-            
-            const youtubeId = data.items?.[0]?.id?.videoId || null;
-            
-            if (youtubeId) {
-                console.log(`✅ YouTube: Encontrado resultado con query: ${query}`);
-                // 🟢 CORRECCIÓN CLAVE: Devolver la URL de incrustación (embed) de YouTube
-                return `https://www.youtube.com/embed/${youtubeId}`; 
-            }
-        } catch (err) {
-            console.error(`❌ Error en búsqueda de YouTube con query "${query}":`, err.message);
-            // Continuar con el siguiente query si hay un error de red o API
-        }
+    if (pelicula_url) {
+        console.log(`✅ YouTube: Encontrada Película COMPLETA para "${movieTitle}".`);
+        return pelicula_url;
     }
 
-    console.log("⚠️ YouTube: No se encontró un enlace de película o tráiler compatible.");
-    return null;
+    // --- 2. INTENTAR BUSCAR TRÁILER (RESPALDO para evitar NULL) ---
+    const trailerQuery = `${movieTitle} ${releaseYear} trailer oficial español`;
+    pelicula_url = await fetchYoutubeEmbedUrl(trailerQuery);
+    
+    if (pelicula_url) {
+        console.log(`🎥 YouTube: Encontrado TRÁILER para "${movieTitle}" (Respaldo).`);
+        return pelicula_url;
+    }
+    
+    console.log(`⚠️ YouTube: No se encontró enlace de Película COMPLETA ni TRÁILER para "${movieTitle}".`);
+    // Si ambos fallan, devolvemos null, pero la intención es que el tráiler falle muy rara vez.
+    return null; 
 }
 
 // NOTA: Esta función se usa para un solo resultado detallado (Ej. /peliculas/Titulo).

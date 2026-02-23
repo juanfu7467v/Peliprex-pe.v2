@@ -1,4 +1,4 @@
-// index.js — API completa de Películas con respaldo TMDb + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
+// index.js — API completa de Películas con respaldo TMDb + PeliPREX + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
 // ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
 
 import express from "express";
@@ -373,12 +373,25 @@ app.get("/peliculas/:titulo", async (req, res) => {
     return res.json({ fuente: "local", resultados: resultado });
 
   console.log(`🔎 No se encontró "${tituloRaw}" en el JSON. Buscando respaldo...`);
+
+  // 🆕 PELIPREX — Paso 2: Buscar en PeliPREX antes de intentar YouTube
   try {
-    // buscarPeliculaRespaldo solo trae el primer resultado y lo detalla
+    const peliprexData = await buscarEnPeliPREX(tituloRaw);
+    if (peliprexData) {
+      console.log(`✅ Resultado encontrado en PeliPREX para "${tituloRaw}".`);
+      return res.json({ fuente: "peliprex", ...peliprexData });
+    }
+  } catch (errPeliprex) {
+    console.error("❌ Error al buscar en PeliPREX:", errPeliprex.message);
+  }
+  // 🆕 PELIPREX — Fin del bloque PeliPREX
+
+  try {
+    // buscarPeliculaRespaldo solo trae el primer resultado y lo detalla (YouTube como último respaldo)
     const respaldo = await buscarPeliculaRespaldo(tituloRaw);
     if (respaldo) return res.json({ fuente: "respaldo", resultados: [respaldo] });
     
-    // Si no hay resultados en el respaldo
+    // Si no hay resultados en ningún respaldo
     return res.json({ 
         fuente: "local/respaldo", 
         total: 0, 
@@ -426,8 +439,26 @@ app.get("/buscar", async (req, res) => {
     return res.json({ fuente: "local", total: resultados.length, resultados });
   }
 
-  // --- 2. BÚSQUEDA DE RESPALDO (TMDb) ---
-  console.log("🔎 No se encontraron resultados en el JSON local. Buscando respaldo avanzado...");
+  // --- 2. BÚSQUEDA PELIPREX (🆕 NUEVO RESPALDO PRINCIPAL) ---
+  console.log("🔎 No se encontraron resultados en el JSON local. Buscando en PeliPREX...");
+
+  // 🆕 PELIPREX — Usar el parámetro q, o genero, o el primer filtro disponible como query
+  const queryPeliprex = q || genero || "";
+  if (queryPeliprex) {
+    try {
+      const peliprexData = await buscarEnPeliPREX(queryPeliprex);
+      if (peliprexData) {
+        console.log(`✅ Resultado encontrado en PeliPREX para "${queryPeliprex}".`);
+        return res.json({ fuente: "peliprex", total: peliprexData.count, ...peliprexData });
+      }
+    } catch (errPeliprex) {
+      console.error("❌ Error al buscar en PeliPREX:", errPeliprex.message);
+    }
+  }
+  // 🆕 PELIPREX — Fin del bloque PeliPREX
+
+  // --- 3. BÚSQUEDA DE RESPALDO FINAL (TMDb + YouTube como último recurso) ---
+  console.log("🔎 No se encontraron resultados en PeliPREX. Buscando respaldo avanzado (TMDb + YouTube)...");
 
   const generoBuscado = String(genero || "").toLowerCase();
   const tmdb_genre_id = TMDB_GENRE_MAP[generoBuscado] || null;
@@ -453,7 +484,7 @@ app.get("/buscar", async (req, res) => {
     console.error("❌ Error al buscar respaldo avanzado:", error);
   }
 
-  // Si no hay resultados en local ni en respaldo
+  // Si no hay resultados en local, peliprex ni en respaldo
   res.json({ fuente: "local/respaldo", total: 0, resultados: [], error: "No se encontraron películas con los criterios de búsqueda, ni localmente ni en el respaldo." });
 });
 
@@ -475,9 +506,22 @@ app.get("/peliculas/categoria/:genero", async (req, res) => {
             resultados: shuffleArray(resultados) 
         });
     }
+
+    // 🆕 PELIPREX — Paso 2: Buscar en PeliPREX antes de intentar TMDb + YouTube
+    console.log(`🔎 No se encontró la categoría "${generoRaw}" localmente. Buscando en PeliPREX...`);
+    try {
+      const peliprexData = await buscarEnPeliPREX(generoRaw);
+      if (peliprexData) {
+        console.log(`✅ Resultado encontrado en PeliPREX para categoría "${generoRaw}".`);
+        return res.json({ fuente: "peliprex", total: peliprexData.count, ...peliprexData });
+      }
+    } catch (errPeliprex) {
+      console.error("❌ Error al buscar categoría en PeliPREX:", errPeliprex.message);
+    }
+    // 🆕 PELIPREX — Fin del bloque PeliPREX
     
-    // 2. Búsqueda de Respaldo (TMDb) si la local falla
-    console.log(`🔎 No se encontró la categoría "${generoRaw}" en el JSON. Buscando respaldo...`);
+    // 3. Búsqueda de Respaldo Final (TMDb + YouTube) si PeliPREX también falla
+    console.log(`🔎 No se encontró la categoría "${generoRaw}" en PeliPREX. Buscando respaldo TMDb + YouTube...`);
 
     const tmdb_genre_id = TMDB_GENRE_MAP[generoBuscado];
     
@@ -893,6 +937,7 @@ app.get("/user/consume_credit", (req, res) => {
 
 // ------------------- RESPALDO TMDb + YouTube (BUSQUEDA DE UNA SOLA PELICULA) -------------------
 // NOTA: Esta función se usa para un solo resultado detallado (Ej. /peliculas/Titulo).
+// YouTube se mantiene aquí como ÚLTIMO RECURSO si PeliPREX no devuelve resultados.
 async function buscarPeliculaRespaldo(titulo) {
   if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
       console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
@@ -910,7 +955,7 @@ async function buscarPeliculaRespaldo(titulo) {
     const detallesResp = await fetch(detallesUrl);
     const detalles = await detallesResp.json();
 
-    // 🎯 Lógica para buscar la película completa en YouTube
+    // 🎯 Lógica para buscar la película completa en YouTube (último recurso)
     // Se utiliza "película completa" para asegurar un resultado que no sea un tráiler.
     const year = pelicula.release_date ? ` (${pelicula.release_date.substring(0, 4)})` : '';
     const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Añadimos 'español latino' para mejorar la búsqueda
@@ -941,6 +986,7 @@ async function buscarPeliculaRespaldo(titulo) {
 }
 
 // 🆕 NUEVA FUNCIÓN: Búsqueda general en TMDb (para listas/avanzada/categorías)
+// YouTube se mantiene aquí como ÚLTIMO RECURSO si PeliPREX no devuelve resultados.
 async function searchTMDb(params) {
     if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
         return [];
@@ -1010,6 +1056,61 @@ async function searchTMDb(params) {
         return [];
     }
 }
+
+
+// ------------------- 🆕 PELIPREX: FUNCIÓN DE BÚSQUEDA -------------------
+/**
+ * Busca una película en la API de PeliPREX.
+ * Se usa como respaldo principal (segundo nivel) antes de recurrir a YouTube.
+ * El resultado se devuelve tal como viene de la API, pero organizado por capítulos cuando corresponda.
+ *
+ * @param {string} query - Título o término a buscar.
+ * @returns {object|null} - Objeto con count, results y porCapitulos (si aplica), o null si no hay resultados o hay error.
+ */
+async function buscarEnPeliPREX(query) {
+  try {
+    const url = `https://peliprex.fly.dev/search?q=${encodeURIComponent(query)}`;
+    console.log(`📡 Buscando en PeliPREX: "${query}"...`);
+    const resp = await fetch(url);
+
+    if (!resp.ok) {
+      console.error(`❌ PeliPREX respondió con status ${resp.status}`);
+      return null;
+    }
+
+    const data = await resp.json();
+
+    if (!data.results || data.results.length === 0) {
+      console.log(`ℹ️ PeliPREX no encontró resultados para "${query}".`);
+      return null;
+    }
+
+    // Organizar por capítulos cuando corresponda:
+    // Se agrupa por título normalizado. Si hay más de un grupo o algún grupo
+    // tiene más de un elemento, se incluye el campo porCapitulos.
+    const porCapitulos = {};
+    for (const item of data.results) {
+      const key = (item.title || "Sin título").trim();
+      if (!porCapitulos[key]) porCapitulos[key] = [];
+      porCapitulos[key].push(item);
+    }
+
+    const hayCapitulos =
+      Object.keys(porCapitulos).length > 1 ||
+      Object.values(porCapitulos).some(v => v.length > 1);
+
+    return {
+      count: data.count,
+      results: data.results,
+      ...(hayCapitulos && { porCapitulos }) // Solo se incluye si hay múltiples grupos o versiones
+    };
+
+  } catch (err) {
+    console.error("❌ Error al buscar en PeliPREX:", err.message);
+    return null;
+  }
+}
+// ------------------- FIN PELIPREX -------------------
 
 
 // ------------------- INICIAR SERVIDOR -------------------

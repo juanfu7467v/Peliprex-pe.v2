@@ -1,5 +1,67 @@
-// index.js — API completa de Películas con respaldo TMDb + embeds externos + sistema de usuarios
-// ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y REPRODUCCIÓN CON EMBEDS EXTERNOS!
+Necesito realizar mejoras en el sistema de reproducción de películas. Actualmente, el código funciona bien, pero depende completamente de YouTube, lo cual es una limitación porque ese contenido suele eliminarse o no está disponible.
+El objetivo es mejorar la lógica para que la plataforma pueda reproducir películas completas utilizando embeds externos, como lo hacen aplicaciones tipo Magis TV.
+🔧 Cambios requeridos
+1. Reemplazar YouTube como fuente principal
+Actualmente se usa YouTube para obtener los videos.
+Necesito que se deje de depender de YouTube como fuente principal y que solo se use opcionalmente para trailers.
+En su lugar, se debe generar directamente la URL del reproductor utilizando el ID de TMDb.
+2. Implementar embeds de video (Vidsrc / SuperEmbed)
+Dentro de la función buscarPeliculaRespaldo, debes agregar la lógica para generar la URL del reproductor usando el ID de TMDb.
+Ejemplo:
+Javascript
+
+async function buscarPeliculaRespaldo(titulo) {
+  // Obtener datos desde TMDb
+  const pelicula = data.results[0];
+  const tmdbId = pelicula.id;
+
+  // Fuentes de video
+  const vidsrcUrl = `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&lang=es`;
+  const superEmbedUrl = `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`;
+
+  return {
+    titulo: pelicula.title,
+    descripcion: pelicula.overview,
+    imagen_url: `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`,
+
+    // Usar embed como fuente principal
+    pelicula_url: vidsrcUrl,
+    fuente_video: "Vidsrc Player",
+    respaldo: true
+  };
+}
+3. Optimizar la función searchTMDb
+Actualmente se hace una llamada a YouTube por cada película, lo cual consume rápido la cuota de la API.
+Esto debe eliminarse.
+En su lugar, generar directamente la URL del video usando el ID de TMDb:
+Javascript
+
+pelicula_url: `https://vidsrc.to/embed/movie/${pelicula.id}`
+Esto reduce el uso de APIs externas y mejora el rendimiento.
+4. Implementar sistema de múltiples fuentes (Mirror)
+Para mejorar la disponibilidad, se debe implementar un sistema que pruebe varias fuentes de video en caso de que una falle.
+Ejemplo de lógica:
+Fuente principal: Vidsrc
+Fuente secundaria: SuperEmbed
+Si una no carga, automáticamente usar la siguiente
+5. Ajuste en el frontend
+El reproductor debe mostrar la película usando un <iframe> en lugar de un <video> directo.
+Debe recibir la URL generada (pelicula_url) y cargarla correctamente.
+⚠️ Consideraciones importantes
+No se debe intentar obtener archivos .mp4 directos, ya que usan tokens temporales y son difíciles de mantener.
+Los embeds pueden mostrar anuncios (pop-ups), esto es normal en este tipo de servicios.
+Mantener el resto del código, diseño y funcionamiento actual completamente intactos.
+🎯 Objetivo final
+Reducir dependencia de YouTube
+Mejorar disponibilidad de contenido
+Evitar consumo innecesario de APIs
+Ofrecer reproducción más estable y completa si conoces otras formas también efectivas de obtener el link de reproducción le hagregas también 
+No realizar ningún otro cambio que no esté especificado aquí. Todo lo demás debe mantenerse exactamente igual y funcionando correctamente.
+
+ 
+
+// index.js — API completa de Películas con respaldo TMDb + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
+// ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
 
 import express from "express";
 import cors from "cors";
@@ -17,11 +79,12 @@ const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-rep
 const BACKUP_FILE_NAME = "users_data.json";
 
 // 🔑 Claves de API (Obtenidas de Variables de Entorno/Secrets)
+// Asegúrate de configurar TMDB_API_KEY y YOUTUBE_API_KEY en tus secretos/variables de entorno.
 const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY; // Opcional ahora
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
 if (!TMDB_API_KEY) console.error("❌ ERROR: La variable de entorno TMDB_API_KEY no está configurada.");
-if (!YOUTUBE_API_KEY) console.warn("⚠️ ADVERTENCIA: YOUTUBE_API_KEY no configurada. Los trailers no estarán disponibles.");
+if (!YOUTUBE_API_KEY) console.error("❌ ERROR: La variable de entorno YOUTUBE_API_KEY no está configurada.");
 
 
 // 📂 Archivos locales (Mantenidos)
@@ -890,89 +953,34 @@ app.get("/user/consume_credit", (req, res) => {
     });
 });
 
-// ------------------- RESPALDO TMDb CON EMBEDS EXTERNOS (SIN YOUTUBE) -------------------
-/**
- * 🎬 FUNCIÓN MEJORADA: Búsqueda de una película con embeds externos (Vidsrc, SuperEmbed, etc.)
- * Esta función genera URLs de reproducción directamente usando el ID de TMDb.
- * YouTube solo se usa opcionalmente para trailers.
- */
+// ------------------- RESPALDO TMDb + YouTube (BUSQUEDA DE UNA SOLA PELICULA) -------------------
+// NOTA: Esta función se usa para un solo resultado detallado (Ej. /peliculas/Titulo).
 async function buscarPeliculaRespaldo(titulo) {
-  if (!TMDB_API_KEY) {
-      console.error("❌ No se puede usar el respaldo: Falta TMDB_API_KEY.");
+  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
+      console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
       return null;
   }
   
   try {
-    // 1. Buscar la película en TMDb
-    const searchUrl = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(titulo)}`;
-    const searchResp = await fetch(searchUrl);
-    const searchData = await searchResp.json();
-    
-    if (!searchData.results || searchData.results.length === 0) {
-      console.log(`⚠️ No se encontró "${titulo}" en TMDb.`);
-      return null;
-    }
+    const url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(titulo)}`;
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.results || data.results.length === 0) return null;
 
-    const pelicula = searchData.results[0];
-    const tmdbId = pelicula.id;
-
-    // 2. Obtener detalles completos de la película
-    const detallesUrl = `https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&language=es-ES`;
+    const pelicula = data.results[0];
+    const detallesUrl = `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
     const detallesResp = await fetch(detallesUrl);
     const detalles = await detallesResp.json();
 
-    // 🎯 3. GENERAR URLs DE EMBEDS EXTERNOS (Sistema de Mirrors)
-    const mirrors = [
-      {
-        nombre: "Vidsrc.me",
-        url: `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&lang=es`,
-        prioridad: 1
-      },
-      {
-        nombre: "Vidsrc.to", 
-        url: `https://vidsrc.to/embed/movie/${tmdbId}`,
-        prioridad: 2
-      },
-      {
-        nombre: "SuperEmbed",
-        url: `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`,
-        prioridad: 3
-      },
-      {
-        nombre: "Vidsrc.xyz",
-        url: `https://vidsrc.xyz/embed/movie/${tmdbId}`,
-        prioridad: 4
-      },
-      {
-        nombre: "2embed",
-        url: `https://www.2embed.cc/embed/${tmdbId}`,
-        prioridad: 5
-      }
-    ];
+    // 🎯 Lógica para buscar la película completa en YouTube
+    // Se utiliza "película completa" para asegurar un resultado que no sea un tráiler.
+    const year = pelicula.release_date ? ` (${pelicula.release_date.substring(0, 4)})` : '';
+    const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Añadimos 'español latino' para mejorar la búsqueda
+    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
+    const youtubeResp = await fetch(youtubeUrl);
+    const youtubeData = await youtubeResp.json();
+    const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
 
-    // Fuente principal (primera en la lista)
-    const fuentePrincipal = mirrors[0];
-
-    // 4. (OPCIONAL) Buscar trailer en YouTube si está configurado
-    let trailerUrl = null;
-    if (YOUTUBE_API_KEY) {
-      try {
-        const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
-        const youtubeQuery = `${pelicula.title} ${year} trailer oficial español`;
-        const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
-        const youtubeResp = await fetch(youtubeUrl);
-        const youtubeData = await youtubeResp.json();
-        const youtubeId = youtubeData.items?.[0]?.id?.videoId;
-        
-        if (youtubeId) {
-          trailerUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
-        }
-      } catch (err) {
-        console.warn("⚠️ No se pudo obtener el trailer de YouTube:", err.message);
-      }
-    }
-
-    // 5. Retornar los datos de la película con embeds
     return {
       titulo: pelicula.title,
       descripcion: pelicula.overview || "",
@@ -984,32 +992,19 @@ async function buscarPeliculaRespaldo(titulo) {
       imagen_url: pelicula.poster_path
         ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
         : "",
-      
-      // 🎬 URL DE REPRODUCCIÓN PRINCIPAL (Embed externo)
-      pelicula_url: fuentePrincipal.url,
-      fuente_video: fuentePrincipal.nombre,
-      
-      // 🔄 SISTEMA DE MIRRORS (Fuentes alternativas)
-      mirrors: mirrors,
-      
-      // 🎞️ TRAILER (Opcional, si está disponible)
-      trailer_url: trailerUrl,
-      
-      // Metadatos adicionales
-      tmdb_id: tmdbId,
+      // Si se encuentra en YouTube, se usa su URL, si no, es null.
+      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null, 
       respaldo: true
     };
-
   } catch (err) {
-    console.error("❌ Error en buscarPeliculaRespaldo:", err.message);
+    console.error("❌ Error TMDb o YouTube:", err.message);
     return null;
   }
 }
 
-// 🆕 FUNCIÓN MEJORADA: Búsqueda general en TMDb con embeds (para listas/avanzada/categorías)
+// 🆕 NUEVA FUNCIÓN: Búsqueda general en TMDb (para listas/avanzada/categorías)
 async function searchTMDb(params) {
-    if (!TMDB_API_KEY) {
-        console.error("❌ No se puede usar searchTMDb: Falta TMDB_API_KEY.");
+    if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
         return [];
     }
     
@@ -1039,42 +1034,38 @@ async function searchTMDb(params) {
         
         if (!data.results || data.results.length === 0) return [];
 
-        // Limitar a 10 resultados para optimizar rendimiento
-        const resultsToEnrich = data.results.slice(0, 10);
+        const resultsToEnrich = data.results.slice(0, 10); // Limitar a 10 resultados para no sobrecargar el API de YouTube
         const enrichedResults = [];
 
         for (const pelicula of resultsToEnrich) {
             if (!pelicula.title) continue; // Saltar si no tiene título
             
-            const tmdbId = pelicula.id;
-
-            // 🎯 Generar URL de embed directamente (sin llamar a YouTube)
-            const embedUrl = `https://vidsrc.to/embed/movie/${tmdbId}`;
+            const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
+            const youtubeQuery = `${pelicula.title} ${year} película completa español latino`;
+            const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
             
-            // Estructura de datos optimizada
+            const youtubeResp = await fetch(youtubeUrl);
+            const youtubeData = await youtubeResp.json();
+            const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+            
+            // Reutilizar la estructura de datos del local
             enrichedResults.push({
                 titulo: pelicula.title,
                 descripcion: pelicula.overview || "",
                 fecha_lanzamiento: pelicula.release_date || "",
                 idioma_original: pelicula.original_language || "",
                 puntuacion: pelicula.vote_average || 0,
-                popularidad: pelicula.popularity || 0,
-                generos_ids: pelicula.genre_ids || [],
+                generos_ids: pelicula.genre_ids || [], // Dejar los IDs de género
                 imagen_url: pelicula.poster_path
                     ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
                     : "",
-                
-                // 🎬 URL DE REPRODUCCIÓN (Embed externo)
-                pelicula_url: embedUrl,
-                fuente_video: "Vidsrc.to",
-                
-                // Metadatos
-                tmdb_id: tmdbId,
+                pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
                 respaldo: true
             });
         }
 
-        return enrichedResults;
+        // Devolver solo las películas a las que se les encontró un enlace de YouTube
+        return enrichedResults.filter(p => p.pelicula_url); 
 
     } catch (err) {
         console.error("❌ Error en searchTMDb:", err.message);
@@ -1090,11 +1081,7 @@ async function startServer() {
   
   // 2. Iniciar el servidor
   const PORT = process.env.PORT || 8080;
-  app.listen(PORT, () => {
-    console.log(`✅ Servidor corriendo en http://localhost:${PORT}`);
-    console.log(`🎬 Sistema de embeds externos activado (Vidsrc, SuperEmbed, etc.)`);
-    console.log(`📊 Total de películas locales: ${peliculas.length}`);
-  });
+  app.listen(PORT, () => console.log(`✅ Servidor corriendo en http://localhost:${PORT}`));
 }
 
 startServer();

@@ -1,5 +1,6 @@
 // index.js — API completa de Películas con respaldo TMDb + PeliPREX + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
 // ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
+// ✅ ACTUALIZADO: Sistema anti-duplicados en historial + Health Check automático de enlaces
 
 import express from "express";
 import cors from "cors";
@@ -46,6 +47,36 @@ function shuffleArray(array) {
         [array[i], array[j]] = [array[j], array[i]];
     }
     return array;
+}
+
+// 🆕 NUEVA FUNCIÓN: Health Check para verificar si un enlace está activo
+/**
+ * Verifica si una URL responde correctamente con una petición HEAD rápida.
+ * @param {string} url - URL a verificar
+ * @param {number} timeout - Tiempo máximo de espera en milisegundos (default: 5000)
+ * @returns {Promise<boolean>} - true si la URL está activa, false si no
+ */
+async function checkUrlHealth(url, timeout = 5000) {
+  if (!url) return false;
+  
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    const response = await fetch(url, {
+      method: 'HEAD',
+      signal: controller.signal,
+      redirect: 'follow'
+    });
+    
+    clearTimeout(timeoutId);
+    
+    // Considerar válido si el status es 2xx o 3xx
+    return response.ok || (response.status >= 200 && response.status < 400);
+  } catch (error) {
+    console.log(`⚠️ URL no disponible (${url}): ${error.message}`);
+    return false;
+  }
 }
 
 // Mapeo de las categorías del usuario a los IDs de Género de TMDb.
@@ -362,42 +393,87 @@ app.get("/", (req, res) => {
 
 app.get("/peliculas", (req, res) => res.json(peliculas));
 
+// 🆕 MEJORADO: Búsqueda de películas con Health Check automático
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
-  const resultado = peliculas.filter(p =>
+  
+  console.log(`🔍 Buscando película: "${tituloRaw}"`);
+  
+  // --- PASO 1: Buscar en BASE LOCAL ---
+  const resultadosLocales = peliculas.filter(p =>
     (p.titulo || "").toLowerCase().includes(titulo)
   );
 
-  if (resultado.length > 0)
-    return res.json({ fuente: "local", resultados: resultado });
+  if (resultadosLocales.length > 0) {
+    console.log(`✅ Encontrada en base local. Verificando enlaces...`);
+    
+    // Verificar cada resultado local
+    for (const pelicula of resultadosLocales) {
+      if (pelicula.pelicula_url) {
+        const isHealthy = await checkUrlHealth(pelicula.pelicula_url);
+        
+        if (isHealthy) {
+          console.log(`✅ Enlace local verificado y funcional`);
+          return res.json({ fuente: "local", resultados: [pelicula] });
+        } else {
+          console.log(`⚠️ Enlace local no disponible. Buscando alternativas...`);
+        }
+      }
+    }
+  }
 
-  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON. Buscando respaldo...`);
+  console.log(`🔎 No se encontró "${tituloRaw}" con enlace válido en local. Buscando en PeliPREX...`);
 
-  // 🆕 PELIPREX — Paso 2: Buscar en PeliPREX antes de intentar YouTube
+  // --- PASO 2: Buscar en PELIPREX (Respaldo Principal) ---
   try {
     const peliprexData = await buscarEnPeliPREX(tituloRaw);
-    if (peliprexData) {
-      console.log(`✅ Resultado encontrado en PeliPREX para "${tituloRaw}".`);
-      return res.json({ fuente: "peliprex", ...peliprexData });
+    
+    if (peliprexData && peliprexData.results && peliprexData.results.length > 0) {
+      // Verificar el primer resultado de PeliPREX
+      for (const resultado of peliprexData.results) {
+        if (resultado.videoUrl) {
+          const isHealthy = await checkUrlHealth(resultado.videoUrl);
+          
+          if (isHealthy) {
+            console.log(`✅ Resultado encontrado y verificado en PeliPREX`);
+            return res.json({ fuente: "peliprex", ...peliprexData });
+          } else {
+            console.log(`⚠️ Enlace de PeliPREX no disponible. Continuando búsqueda...`);
+          }
+        }
+      }
     }
   } catch (errPeliprex) {
     console.error("❌ Error al buscar en PeliPREX:", errPeliprex.message);
   }
-  // 🆕 PELIPREX — Fin del bloque PeliPREX
 
+  console.log(`🔎 No se encontró en PeliPREX. Buscando en YouTube (último respaldo)...`);
+
+  // --- PASO 3: Buscar en YOUTUBE (Último Respaldo) ---
   try {
-    // buscarPeliculaRespaldo solo trae el primer resultado y lo detalla (YouTube como último respaldo)
     const respaldo = await buscarPeliculaRespaldo(tituloRaw);
-    if (respaldo) return res.json({ fuente: "respaldo", resultados: [respaldo] });
     
-    // Si no hay resultados en ningún respaldo
-    return res.json({ 
-        fuente: "local/respaldo", 
-        total: 0, 
-        resultados: [], 
-        error: "Película no encontrada en local ni en respaldo." 
+    if (respaldo && respaldo.pelicula_url) {
+      const isHealthy = await checkUrlHealth(respaldo.pelicula_url);
+      
+      if (isHealthy) {
+        console.log(`✅ Resultado encontrado y verificado en YouTube`);
+        return res.json({ fuente: "respaldo", resultados: [respaldo] });
+      } else {
+        console.log(`⚠️ Enlace de YouTube no disponible`);
+      }
+    }
+    
+    // Si llegamos aquí, no hay enlaces disponibles
+    console.log(`❌ No se encontraron enlaces disponibles para "${tituloRaw}"`);
+    return res.status(404).json({ 
+      fuente: "ninguna", 
+      total: 0, 
+      resultados: [], 
+      error: "No se encontraron enlaces disponibles para esta película en ninguna fuente." 
     });
+    
   } catch (error) {
     console.error("❌ Error al buscar respaldo:", error);
     res.status(500).json({ error: "Error al consultar respaldo externo." });
@@ -647,20 +723,45 @@ app.get("/user/favorites/remove", (req, res) => {
   res.status(404).json({ ok: false, message: "Película no encontrada en favoritos." });
 });
 
-// Historial
+// ✅ MEJORADO: Historial sin duplicados
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query; // Capturar la URL cruda
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
   
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
 
   const user = getOrCreateUser(email);
-  user.history.unshift({ titulo, pelicula_url, imagen_url, fecha: new Date().toISOString() });
-  if (user.history.length > 200) user.history = user.history.slice(0, 200);
+  
+  // 🆕 MEJORA 1: Eliminar duplicados - Buscar si ya existe la película en el historial
+  const existingIndex = user.history.findIndex(h => h.pelicula_url === pelicula_url);
+  
+  if (existingIndex !== -1) {
+    // Si existe, eliminarla de su posición actual
+    user.history.splice(existingIndex, 1);
+    console.log(`🔄 Película "${titulo}" ya existía en el historial. Moviendo al inicio.`);
+  }
+  
+  // Agregar la película al inicio del historial (como "visto recientemente")
+  user.history.unshift({ 
+    titulo, 
+    pelicula_url, 
+    imagen_url, 
+    fecha: new Date().toISOString() 
+  });
+  
+  // Mantener el límite máximo de 200 registros
+  if (user.history.length > 200) {
+    user.history = user.history.slice(0, 200);
+  }
+  
   saveUser(email, user);
-  res.json({ ok: true, total: user.history.length });
+  res.json({ 
+    ok: true, 
+    total: user.history.length,
+    message: existingIndex !== -1 ? "Película movida al inicio del historial" : "Película agregada al historial"
+  });
 });
 
 app.get("/user/history", (req, res) => {

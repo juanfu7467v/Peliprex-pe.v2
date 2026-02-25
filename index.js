@@ -36,19 +36,6 @@ function shuffleArray(array) {
     return array;
 }
 
-/** Elimina duplicados basándose en una clave única (por defecto 'titulo') */
-function removeDuplicates(array, key = 'titulo') {
-    const seen = new Set();
-    return array.filter(item => {
-        const value = item[key];
-        if (seen.has(value)) {
-            return false;
-        }
-        seen.add(value);
-        return true;
-    });
-}
-
 // ------------------- FUNCIONES DE GITHUB -------------------
 
 /** Obtiene el SHA de la última versión del archivo en GitHub, necesario para actualizar. */
@@ -304,78 +291,56 @@ setInterval(() => {
 
 }, MS_IN_24_HOURS); // Ejecutar cada 24 horas
 
-// ------------------- FUNCIONES PARA CONSULTAR API EXTERNA -------------------
-const API_EXTERNA_BASE = "https://peliprex.fly.dev";
-
-async function fetchPeliculasDesdeCatalogo() {
-    try {
-        const response = await fetch(`${API_EXTERNA_BASE}/catalog`);
-        if (!response.ok) {
-            console.log(`⚠️ Error al consultar catálogo externo: ${response.status}`);
-            return [];
-        }
-        const data = await response.json();
-        console.log(`✅ Cargadas ${data.length || 0} películas desde catálogo externo`);
-        return Array.isArray(data) ? data : [];
-    } catch (error) {
-        console.error("❌ Error al consultar catálogo externo:", error.message);
-        return [];
+// ------------------- FUNCIÓN PARA CONSULTAR API EXTERNA EN PARALELO -------------------
+async function fetchExternalPeliculas() {
+  try {
+    const response = await fetch('https://peliprex.fly.dev/catalog');
+    if (!response.ok) {
+      console.log(`⚠️ API externa respondió con status ${response.status}`);
+      return [];
     }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.log("⚠️ Error al consultar API externa /catalog:", error.message);
+    return [];
+  }
 }
 
-async function fetchPeliculasPorGenero(genero) {
-    try {
-        const response = await fetch(`${API_EXTERNA_BASE}/search?genre=${encodeURIComponent(genero)}`);
-        if (!response.ok) {
-            console.log(`⚠️ Error al consultar API externa por género: ${response.status}`);
-            return [];
-        }
-        const data = await response.json();
-        console.log(`✅ Cargadas ${data.length || 0} películas desde API externa para género: ${genero}`);
-        return Array.isArray(data) ? data : [];
-    } catch (error) {
-        console.error("❌ Error al consultar API externa por género:", error.message);
-        return [];
+async function fetchExternalSearch(params = {}) {
+  try {
+    const url = new URL('https://peliprex.fly.dev/search');
+    
+    // Agregar todos los parámetros de búsqueda
+    if (params.q) url.searchParams.append('q', params.q);
+    if (params.genre) url.searchParams.append('genre', params.genre);
+    if (params.year) url.searchParams.append('year', params.year);
+    if (params.desde) url.searchParams.append('desde', params.desde);
+    if (params.hasta) url.searchParams.append('hasta', params.hasta);
+    if (params.language) url.searchParams.append('language', params.language);
+    
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      console.log(`⚠️ API externa search respondió con status ${response.status}`);
+      return [];
     }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.log("⚠️ Error al consultar API externa /search:", error.message);
+    return [];
+  }
 }
 
-async function fetchPeliculasPorTitulo(titulo) {
-    try {
-        const response = await fetch(`${API_EXTERNA_BASE}/search?q=${encodeURIComponent(titulo)}`);
-        if (!response.ok) {
-            console.log(`⚠️ Error al consultar API externa por título: ${response.status}`);
-            return [];
-        }
-        const data = await response.json();
-        console.log(`✅ Cargadas ${data.length || 0} películas desde API externa para búsqueda: ${titulo}`);
-        return Array.isArray(data) ? data : [];
-    } catch (error) {
-        console.error("❌ Error al consultar API externa por título:", error.message);
-        return [];
-    }
-}
-
-async function fetchPeliculasAvanzada(params) {
-    try {
-        const url = new URL(`${API_EXTERNA_BASE}/search`);
-        Object.keys(params).forEach(key => {
-            if (params[key]) {
-                url.searchParams.append(key, params[key]);
-            }
-        });
-        
-        const response = await fetch(url.toString());
-        if (!response.ok) {
-            console.log(`⚠️ Error al consultar API externa avanzada: ${response.status}`);
-            return [];
-        }
-        const data = await response.json();
-        console.log(`✅ Cargadas ${data.length || 0} películas desde API externa avanzada`);
-        return Array.isArray(data) ? data : [];
-    } catch (error) {
-        console.error("❌ Error al consultar API externa avanzada:", error.message);
-        return [];
-    }
+function combinarResultados(externos, locales) {
+  // Crear un Set con las URLs de los resultados externos para evitar duplicados
+  const urlsExternas = new Set(externos.map(p => p.pelicula_url));
+  
+  // Filtrar locales que no estén ya en externos
+  const localesUnicos = locales.filter(p => !urlsExternas.has(p.pelicula_url));
+  
+  // Dar prioridad a externos, luego complementar con locales únicos
+  return [...externos, ...localesUnicos];
 }
 
 // ------------------- RUTAS PRINCIPALES -------------------
@@ -387,212 +352,174 @@ app.get("/", (req, res) => {
   });
 });
 
-// 🔧 MEJORA 1: CARGA DE PELÍCULAS DESDE DOS FUENTES EN PARALELO
+// 🔧 1. MEJORA EN CARGA DE PELÍCULAS (dos fuentes en paralelo)
 app.get("/peliculas", async (req, res) => {
-    try {
-        // Consultar ambas fuentes en paralelo
-        const [peliculasLocales, peliculasExternas] = await Promise.all([
-            Promise.resolve(peliculas), // Fuente local ya cargada
-            fetchPeliculasDesdeCatalogo() // Fuente externa
-        ]);
-        
-        // Unir resultados y eliminar duplicados
-        const todasLasPeliculas = [...peliculasLocales, ...peliculasExternas];
-        const resultadosUnicos = removeDuplicates(todasLasPeliculas, 'titulo');
-        
-        console.log(`✅ /peliculas: ${peliculasLocales.length} locales + ${peliculasExternas.length} externas = ${resultadosUnicos.length} únicas`);
-        
-        res.json(resultadosUnicos);
-    } catch (error) {
-        console.error("❌ Error en /peliculas:", error.message);
-        // Fallback a solo datos locales si algo falla
-        res.json(peliculas);
-    }
+  try {
+    // Consultar ambas fuentes en paralelo
+    const [externas, locales] = await Promise.all([
+      fetchExternalPeliculas(),
+      Promise.resolve(peliculas) // locales ya están cargadas
+    ]);
+    
+    // Combinar resultados dando prioridad a externas
+    const resultadosCombinados = combinarResultados(externas, locales);
+    
+    res.json(resultadosCombinados);
+  } catch (error) {
+    console.error("❌ Error en /peliculas:", error.message);
+    // Fallback a locales si algo falla
+    res.json(peliculas);
+  }
 });
-
-// Mantener el endpoint original para compatibilidad (opcional, pero ya no es necesario)
-// app.get("/peliculas", (req, res) => res.json(peliculas));
 
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
   
-  try {
-      // Consultar ambas fuentes en paralelo
-      const [resultadoLocal, resultadoExterno] = await Promise.all([
-          Promise.resolve(peliculas.filter(p =>
-              (p.titulo || "").toLowerCase().includes(titulo)
-          )),
-          fetchPeliculasPorTitulo(tituloRaw)
-      ]);
-      
-      // Unir resultados y eliminar duplicados
-      const todosResultados = [...resultadoLocal, ...resultadoExterno];
-      const resultadosUnicos = removeDuplicates(todosResultados, 'titulo');
-      
-      if (resultadosUnicos.length > 0) {
-          return res.json({ 
-              fuente: "combinada", 
-              total: resultadosUnicos.length,
-              resultados: resultadosUnicos 
-          });
-      }
+  // Búsqueda local
+  const resultadoLocal = peliculas.filter(p =>
+    (p.titulo || "").toLowerCase().includes(titulo)
+  );
 
-      console.log(`🔎 No se encontró "${tituloRaw}" en ninguna fuente.`);
-      return res.json({ 
-          fuente: "combinada", 
-          total: 0, 
-          resultados: [], 
-          error: "Película no encontrada en ninguna fuente." 
-      });
-  } catch (error) {
-      console.error("❌ Error en búsqueda por título:", error.message);
-      // Fallback a solo datos locales
-      const resultado = peliculas.filter(p =>
-          (p.titulo || "").toLowerCase().includes(titulo)
-      );
-      return res.json({ fuente: "local", resultados: resultado });
-  }
+  if (resultadoLocal.length > 0)
+    return res.json({ fuente: "local", resultados: resultadoLocal });
+
+  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON.`);
+  return res.json({ 
+      fuente: "local", 
+      total: 0, 
+      resultados: [], 
+      error: "Película no encontrada en local." 
+  });
 });
 
-// 🔎 Búsqueda avanzada - MEJORA 4: BÚSQUEDA AVANZADA CON FILTROS
+// 🔧 3. MEJORA EN BÚSQUEDA AVANZADA (dos fuentes en paralelo)
 app.get("/buscar", async (req, res) => {
-  const { año, genero, idioma, desde, hasta, q, year, genre, language, canal, desded, hastad } = req.query;
+  const { año, genero, idioma, desde, hasta, q } = req.query;
   
-  // Normalizar parámetros (aceptar tanto español como inglés)
-  const yearParam = year || año;
-  const genreParam = genre || genero;
-  const languageParam = language || idioma;
-  const desdeParam = desded || desde;
-  const hastaParam = hastad || hasta;
+  // Preparar parámetros para búsqueda externa
+  const paramsExternos = {};
+  if (q) paramsExternos.q = q;
+  if (genero) paramsExternos.genre = genero;
+  if (año) paramsExternos.year = año;
+  if (desde) paramsExternos.desde = desde;
+  if (hasta) paramsExternos.hasta = hasta;
+  if (idioma) paramsExternos.language = idioma;
   
   try {
-      // Construir parámetros para API externa
-      const paramsExternos = {};
-      if (q) paramsExternos.q = q;
-      if (yearParam) paramsExternos.year = yearParam;
-      if (genreParam) paramsExternos.genre = genreParam;
-      if (languageParam) paramsExternos.language = languageParam;
-      if (desdeParam) paramsExternos.desde = desdeParam;
-      if (hastaParam) paramsExternos.hasta = hastaParam;
-      if (canal) paramsExternos.canal = canal;
-      
-      // 1. BÚSQUEDA LOCAL
-      let resultadosLocales = peliculas;
-      
-      if (q) {
-        const ql = q.toLowerCase();
-        resultadosLocales = resultadosLocales.filter(p =>
-          (p.titulo || "").toLowerCase().includes(ql) ||
-          (p.descripcion || "").toLowerCase().includes(ql)
-        );
-      }
-      
-      if (yearParam) resultadosLocales = resultadosLocales.filter(p => String(p.año) === String(yearParam));
-      if (genreParam)
-        resultadosLocales = resultadosLocales.filter(p =>
-          (p.generos || "").toLowerCase().includes(String(genreParam).toLowerCase())
-        );
-      if (languageParam)
-        resultadosLocales = resultadosLocales.filter(
-          p => (p.idioma_original || "").toLowerCase() === String(languageParam).toLowerCase()
-        );
-      if (desdeParam && hastaParam)
-        resultadosLocales = resultadosLocales.filter(
-          p =>
-            parseInt(p.año) >= parseInt(desdeParam) &&
-            parseInt(p.año) <= parseInt(hastaParam)
-        );
-      
-      // 2. BÚSQUEDA EXTERNA (solo si hay al menos un parámetro)
-      let resultadosExternos = [];
-      if (Object.keys(paramsExternos).length > 0) {
-          resultadosExternos = await fetchPeliculasAvanzada(paramsExternos);
-      }
-      
-      // 3. COMBINAR RESULTADOS
-      const todosResultados = [...resultadosLocales, ...resultadosExternos];
-      const resultadosUnicos = removeDuplicates(todosResultados, 'titulo');
-      
-      return res.json({ 
-          fuente: "combinada", 
-          total: resultadosUnicos.length, 
-          resultados: resultadosUnicos 
-      });
-      
-  } catch (error) {
-      console.error("❌ Error en búsqueda avanzada:", error.message);
-      
-      // Fallback a búsqueda local solamente
-      let resultados = peliculas;
-      
-      if (q) {
-        const ql = q.toLowerCase();
-        resultados = resultados.filter(p =>
-          (p.titulo || "").toLowerCase().includes(ql) ||
-          (p.descripcion || "").toLowerCase().includes(ql)
-        );
-      }
-      
-      if (año) resultados = resultados.filter(p => String(p.año) === String(año));
-      if (genero)
-        resultados = resultados.filter(p =>
-          (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
-        );
-      if (idioma)
-        resultados = resultados.filter(
-          p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
-        );
-      if (desde && hasta)
-        resultados = resultados.filter(
-          p =>
-            parseInt(p.año) >= parseInt(desde) &&
-            parseInt(p.año) <= parseInt(hasta)
-        );
+    // Consultar ambas fuentes en paralelo
+    const [resultadosExternos, resultadosLocales] = await Promise.all([
+      // Solo consultar externa si hay al menos un parámetro válido
+      Object.keys(paramsExternos).length > 0 ? fetchExternalSearch(paramsExternos) : Promise.resolve([]),
+      // Búsqueda local en paralelo
+      Promise.resolve(peliculas.filter(p => {
+        let cumple = true;
         
-      res.json({ fuente: "local", total: resultados.length, resultados });
+        if (q) {
+          const ql = q.toLowerCase();
+          cumple = cumple && (
+            (p.titulo || "").toLowerCase().includes(ql) ||
+            (p.descripcion || "").toLowerCase().includes(ql)
+          );
+        }
+        
+        if (año) cumple = cumple && String(p.año) === String(año);
+        if (genero) cumple = cumple && (p.generos || "").toLowerCase().includes(String(genero).toLowerCase());
+        if (idioma) cumple = cumple && (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase();
+        if (desde && hasta) cumple = cumple && parseInt(p.año) >= parseInt(desde) && parseInt(p.año) <= parseInt(hasta);
+        
+        return cumple;
+      }))
+    ]);
+    
+    // Si no hay resultados externos pero sí locales, devolver locales
+    if (resultadosExternos.length === 0 && resultadosLocales.length > 0) {
+      return res.json({ fuente: "local", total: resultadosLocales.length, resultados: resultadosLocales });
+    }
+    
+    // Si hay externos, combinarlos dando prioridad
+    if (resultadosExternos.length > 0) {
+      const combinados = combinarResultados(resultadosExternos, resultadosLocales);
+      return res.json({ fuente: "combinada", total: combinados.length, resultados: combinados });
+    }
+    
+    // Si no hay resultados de ningún lado
+    res.json({ fuente: "local", total: 0, resultados: [], error: "No se encontraron películas con los criterios de búsqueda." });
+    
+  } catch (error) {
+    console.error("❌ Error en búsqueda combinada:", error.message);
+    // Fallback a búsqueda local solamente
+    let resultados = peliculas;
+    
+    if (q) {
+      const ql = q.toLowerCase();
+      resultados = resultados.filter(p =>
+        (p.titulo || "").toLowerCase().includes(ql) ||
+        (p.descripcion || "").toLowerCase().includes(ql)
+      );
+    }
+    
+    if (año) resultados = resultados.filter(p => String(p.año) === String(año));
+    if (genero) resultados = resultados.filter(p =>
+      (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
+    );
+    if (idioma) resultados = resultados.filter(
+      p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
+    );
+    if (desde && hasta) resultados = resultados.filter(
+      p => parseInt(p.año) >= parseInt(desde) && parseInt(p.año) <= parseInt(hasta)
+    );
+    
+    res.json({ fuente: "local", total: resultados.length, resultados });
   }
 });
 
-// 🔧 MEJORA 2: PELÍCULAS POR CATEGORÍA (GÉNERO) CON DOS FUENTES
+// 🔧 2. BÚSQUEDA POR CATEGORÍA (mejorada con dos fuentes)
 app.get("/peliculas/categoria/:genero", async (req, res) => {
     const generoRaw = decodeURIComponent(req.params.genero || "");
     const generoBuscado = generoRaw.toLowerCase();
-    const limit = req.query.limit ? parseInt(req.query.limit) : null;
 
     try {
         // Consultar ambas fuentes en paralelo
-        const [resultadosLocales, resultadosExternos] = await Promise.all([
+        const [resultadosExternos, resultadosLocales] = await Promise.all([
+            fetchExternalSearch({ genre: generoBuscado }),
             Promise.resolve(peliculas.filter(p =>
                 (p.generos || "").toLowerCase().includes(generoBuscado)
-            )),
-            fetchPeliculasPorGenero(generoRaw)
+            ))
         ]);
         
-        // Unir resultados y eliminar duplicados
-        const todosResultados = [...resultadosLocales, ...resultadosExternos];
-        const resultadosUnicos = removeDuplicates(todosResultados, 'titulo');
-        
-        // Aplicar shuffle a los resultados combinados
-        let resultadosFinales = shuffleArray(resultadosUnicos);
-        
-        // Aplicar límite si se especificó
-        if (limit && limit > 0) {
-            resultadosFinales = resultadosFinales.slice(0, limit);
+        // Si hay resultados externos, combinarlos dando prioridad
+        if (resultadosExternos.length > 0) {
+            const combinados = combinarResultados(resultadosExternos, resultadosLocales);
+            // Aleatorizar los resultados combinados
+            return res.json({ 
+                fuente: "combinada", 
+                total: combinados.length, 
+                resultados: shuffleArray(combinados) 
+            });
         }
         
-        console.log(`✅ /categoria/${generoRaw}: ${resultadosLocales.length} locales + ${resultadosExternos.length} externas = ${resultadosFinales.length} mostradas`);
+        // Si solo hay resultados locales
+        if (resultadosLocales.length > 0) {
+            return res.json({ 
+                fuente: "local", 
+                total: resultadosLocales.length, 
+                resultados: shuffleArray(resultadosLocales) 
+            });
+        }
         
+        // Si no hay resultados
+        console.log(`🔎 No se encontró la categoría "${generoRaw}" en ninguna fuente.`);
         return res.json({ 
-            fuente: "combinada", 
-            total: resultadosFinales.length, 
-            resultados: resultadosFinales 
+            fuente: "local", 
+            total: 0, 
+            resultados: [], 
+            error: "No se encontraron películas en la categoría solicitada." 
         });
         
     } catch (error) {
-        console.error(`❌ Error en categoría ${generoRaw}:`, error.message);
-        
-        // Fallback a solo datos locales
+        console.error(`❌ Error en búsqueda por categoría "${generoRaw}":`, error.message);
+        // Fallback a búsqueda local solamente
         let resultados = peliculas.filter(p =>
             (p.generos || "").toLowerCase().includes(generoBuscado)
         );
@@ -605,7 +532,6 @@ app.get("/peliculas/categoria/:genero", async (req, res) => {
             });
         }
         
-        console.log(`🔎 No se encontró la categoría "${generoRaw}" en el JSON.`);
         return res.json({ 
             fuente: "local", 
             total: 0, 
@@ -614,6 +540,7 @@ app.get("/peliculas/categoria/:genero", async (req, res) => {
         });
     }
 });
+
 
 // ------------------- RUTAS DE USUARIOS -------------------
 app.get("/user/get", (req, res) => {

@@ -1,6 +1,6 @@
-// index.js — API completa de Películas + nuevas fuentes de datos
-// ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos!
-// 🔥 MODIFICADO: Eliminadas APIs de TMDB y YouTube, agregada nueva fuente de datos
+// index.js — API de Películas con nueva integración de peliprex.fly.dev + sistema de usuarios
+// Eliminadas: TMDB API y YouTube API v3
+// Nuevas fuentes: peliculas.json (local) + https://peliprex.fly.dev/catalog y /search
 
 import express from "express";
 import cors from "cors";
@@ -12,22 +12,22 @@ const app = express();
 app.use(cors());
 
 // ------------------- GITHUB CONFIGURACIÓN DE RESPALDO -------------------
-// ¡ASEGÚRATE de configurar las variables de entorno GITHUB_TOKEN y GITHUB_REPO!
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
 const BACKUP_FILE_NAME = "users_data.json";
 
-// 📂 Archivos locales (Mantenidos)
+// 📂 Archivos locales
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
+
+// URL de la nueva API
+const PELIPREX_API_BASE = "https://peliprex.fly.dev";
 
 // ------------------- FUNCIONES AUXILIARES -------------------
 
 /** Limpia la URL de la película eliminando la duplicidad '/prepreview' para corregir a '/preview'. */
 function cleanPeliculaUrl(url) {
   if (!url) return url;
-  // Reemplaza '/prepreview' con '/preview' para corregir el error en la URL de Google Drive (o similar).
-  // El $1 asegura que se mantenga cualquier parámetro de consulta (?...) o hash (#...).
   return url.replace(/\/prepreview([?#]|$)/, '/preview$1');
 }
 
@@ -38,6 +38,27 @@ function shuffleArray(array) {
         [array[i], array[j]] = [array[j], array[i]];
     }
     return array;
+}
+
+/** Elimina duplicados basados en el título (para evitar películas repetidas) */
+function removeDuplicatesByTitle(array) {
+    const seen = new Set();
+    return array.filter(item => {
+        const titulo = item.titulo?.toLowerCase() || '';
+        if (seen.has(titulo)) return false;
+        seen.add(titulo);
+        return true;
+    });
+}
+
+// ------------------- CARGAR PELÍCULAS LOCALES -------------------
+let peliculas = [];
+try {
+  peliculas = JSON.parse(fs.readFileSync(PELIS_FILE, "utf8"));
+  console.log(`✅ Cargadas ${peliculas.length} películas desde peliculas.json`);
+} catch (err) {
+  console.error("❌ Error cargando peliculas.json:", err.message);
+  peliculas = [];
 }
 
 // ------------------- FUNCIONES DE GITHUB -------------------
@@ -72,7 +93,6 @@ async function saveUsersDataToGitHub(content) {
   console.log(`💾 Iniciando respaldo de ${BACKUP_FILE_NAME} en GitHub...`);
   try {
     const sha = await getFileSha(BACKUP_FILE_NAME);
-    // Codificar el contenido en base64 para la API de GitHub
     const contentBase64 = Buffer.from(content).toString('base64'); 
     const commitMessage = `Automated backup: Update ${BACKUP_FILE_NAME} at ${new Date().toISOString()}`;
 
@@ -87,7 +107,7 @@ async function saveUsersDataToGitHub(content) {
       body: JSON.stringify({
         message: commitMessage,
         content: contentBase64,
-        sha: sha, // Se requiere el SHA para actualizar o se crea si es null
+        sha: sha,
       }),
     });
 
@@ -116,7 +136,7 @@ async function loadUsersDataFromGitHub() {
     const resp = await fetch(url, {
       headers: {
         'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3.raw', // Obtener el contenido crudo (raw)
+        'Accept': 'application/vnd.github.v3.raw',
       },
     });
 
@@ -141,24 +161,12 @@ async function loadUsersDataFromGitHub() {
   }
 }
 
-
-// ------------------- CARGAR PELÍCULAS -------------------
-let peliculas = [];
-try {
-  peliculas = JSON.parse(fs.readFileSync(PELIS_FILE, "utf8"));
-  console.log(`✅ Cargadas ${peliculas.length} películas desde peliculas.json`);
-} catch (err) {
-  console.error("❌ Error cargando peliculas.json:", err.message);
-  peliculas = [];
-}
-
 // ------------------- FUNCIONES DE USUARIOS -------------------
 function ensureUsersFile() {
   if (!fs.existsSync(USERS_FILE)) {
     console.log(`ℹ️ Creando archivo local: ${BACKUP_FILE_NAME}`);
     const initialData = JSON.stringify({ users: {} }, null, 2);
     fs.writeFileSync(USERS_FILE, initialData);
-    // Respaldo inicial a GitHub al crear el archivo
     saveUsersDataToGitHub(initialData); 
   }
 }
@@ -169,8 +177,6 @@ function readUsersData() {
 function writeUsersData(data) {
   const content = JSON.stringify(data, null, 2);
   fs.writeFileSync(USERS_FILE, content);
-  
-  // Realizar el respaldo a GitHub de forma asíncrona
   saveUsersDataToGitHub(content); 
 }
 function getOrCreateUser(email) {
@@ -184,13 +190,11 @@ function getOrCreateUser(email) {
       favorites: [],
       history: [],
       resume: {},
-      // 🆕 Campo para la limpieza de actividad
       lastActivityTimestamp: new Date().toISOString() 
     };
     writeUsersData(data);
   }
   
-  // Asegurar que el campo resume y lastActivityTimestamp existen en usuarios antiguos
   if (!data.users[email].resume) data.users[email].resume = {};
   if (!data.users[email].lastActivityTimestamp) data.users[email].lastActivityTimestamp = new Date().toISOString();
   
@@ -211,11 +215,8 @@ setInterval(async () => {
     console.log("🕒 Sin tráfico por 1 minuto. Iniciando cierre y respaldo final...");
     
     try {
-      // 1. Leer el estado final desde el archivo local
       const data = readUsersData();
       const content = JSON.stringify(data, null, 2);
-      
-      // 2. Realizar el respaldo final a GitHub y ESPERAR su finalización
       const saved = await saveUsersDataToGitHub(content);
       
       console.log(`✅ Respaldo final ${saved ? 'exitoso' : 'fallido'}. Cerrando servidor.`);
@@ -223,7 +224,6 @@ setInterval(async () => {
       console.error("❌ Error durante el cierre y respaldo final:", e.message);
     }
     
-    // 3. Detener el proceso
     process.exit(0);
   }
 }, 30 * 1000);
@@ -233,11 +233,7 @@ app.use((req, res, next) => {
   next();
 });
 
-
 // ------------------- TAREA PROGRAMADA: ELIMINACIÓN DE ACTIVIDAD CADA 24 HRS -------------------
-/** * Tarea programada para limpiar historial y resumen de películas 
- * que tienen más de 24 horas de la última actividad/latido.
- */
 const MS_IN_24_HOURS = 24 * 60 * 60 * 1000;
 
 setInterval(() => {
@@ -250,11 +246,9 @@ setInterval(() => {
         const user = data.users[email];
         let userActivityModified = false;
 
-        // --- Limpieza de Historial ---
         const historyLengthBefore = user.history.length;
         user.history = user.history.filter(h => {
             const historyDate = new Date(h.fecha).getTime();
-            // Mantener solo lo que fue agregado en las últimas 24 horas
             return now - historyDate < MS_IN_24_HOURS;
         });
         if (user.history.length !== historyLengthBefore) {
@@ -262,13 +256,11 @@ setInterval(() => {
             userActivityModified = true;
         }
 
-        // --- Limpieza de Resumen de Reproducción ---
         const resumeKeysBefore = Object.keys(user.resume).length;
         const newResume = {};
         for (const url in user.resume) {
             const resumeEntry = user.resume[url];
             const lastHeartbeatDate = new Date(resumeEntry.lastHeartbeat).getTime();
-            // Mantener solo lo que tuvo un latido en las últimas 24 horas
             if (now - lastHeartbeatDate < MS_IN_24_HOURS) {
                 newResume[url] = resumeEntry;
             }
@@ -293,78 +285,89 @@ setInterval(() => {
         console.log("ℹ️ No se encontraron actividades para limpiar.");
     }
 
-}, MS_IN_24_HOURS); // Ejecutar cada 24 horas
+}, MS_IN_24_HOURS);
 
 // ------------------- FUNCIÓN PARA OBTENER PELÍCULAS DE LA NUEVA API -------------------
-async function obtenerPeliculasDeNuevaAPI() {
+async function obtenerPeliculasDesdeAPI() {
     try {
-        const response = await fetch('https://peliprex.fly.dev/catalog');
+        const url = `${PELIPREX_API_BASE}/catalog`;
+        const response = await fetch(url);
+        
         if (!response.ok) {
-            console.error(`❌ Error al obtener datos de nueva API: ${response.status}`);
+            console.error(`❌ Error al obtener catálogo: ${response.status}`);
             return [];
         }
+        
         const data = await response.json();
         
-        // Transformar los datos al formato esperado
-        if (data.results && Array.isArray(data.results)) {
-            return data.results.map(item => ({
-                titulo: item.titulo || "Sin título",
-                imagen_url: item.imagen_url || "",
-                pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
-                descripcion: item.descripcion || "",
-                fecha_lanzamiento: item.fecha_lanzamiento || "",
-                duracion: item.duracion || "",
-                idioma_original: item.idioma_original || "",
-                popularidad: item.popularidad || 0,
-                puntuacion: item.puntuacion || 0,
-                generos: item.generos || "",
-                año: item.año || "",
-                id: item.id || "",
-                size: item.size || "",
-                descripcion_detallada: item.descripcion_detallada || "",
-                fuente: "nueva_api"
-            }));
+        if (!data.results || !Array.isArray(data.results)) {
+            console.error("❌ Formato inesperado de la API:", data);
+            return [];
         }
-        return [];
+        
+        // Transformar los datos al formato esperado por el frontend
+        return data.results.map(item => ({
+            titulo: item.titulo || "Sin título",
+            imagen_url: item.imagen_url || "",
+            pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
+            descripcion: item.descripcion || "",
+            fecha_lanzamiento: item.fecha_lanzamiento || "",
+            duracion: item.duracion || "",
+            idioma_original: item.idioma_original || "",
+            popularidad: item.popularidad || 0,
+            puntuacion: item.puntuacion || 0,
+            generos: item.generos || "",
+            año: item.año || "",
+            id: item.id,
+            size: item.size || "",
+            descripcion_detallada: item.descripcion_detallada || "",
+            fuente: "api_externa"
+        }));
+        
     } catch (error) {
-        console.error("❌ Error al obtener películas de nueva API:", error.message);
+        console.error("❌ Error al obtener películas de la API:", error.message);
         return [];
     }
 }
 
-// ------------------- FUNCIÓN PARA BUSCAR EN NUEVA API -------------------
-async function buscarEnNuevaAPI(query) {
+// ------------------- FUNCIÓN PARA BUSCAR EN LA NUEVA API -------------------
+async function buscarPeliculasEnAPI(query) {
     try {
-        const response = await fetch(`https://peliprex.fly.dev/search?q=${encodeURIComponent(query)}`);
+        const url = `${PELIPREX_API_BASE}/search?q=${encodeURIComponent(query)}`;
+        const response = await fetch(url);
+        
         if (!response.ok) {
-            console.error(`❌ Error al buscar en nueva API: ${response.status}`);
+            console.error(`❌ Error en búsqueda API: ${response.status}`);
             return [];
         }
+        
         const data = await response.json();
         
-        // Asumiendo que la API devuelve el mismo formato que /catalog
-        if (data.results && Array.isArray(data.results)) {
-            return data.results.map(item => ({
-                titulo: item.titulo || "Sin título",
-                imagen_url: item.imagen_url || "",
-                pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
-                descripcion: item.descripcion || "",
-                fecha_lanzamiento: item.fecha_lanzamiento || "",
-                duracion: item.duracion || "",
-                idioma_original: item.idioma_original || "",
-                popularidad: item.popularidad || 0,
-                puntuacion: item.puntuacion || 0,
-                generos: item.generos || "",
-                año: item.año || "",
-                id: item.id || "",
-                size: item.size || "",
-                descripcion_detallada: item.descripcion_detallada || "",
-                fuente: "nueva_api"
-            }));
+        if (!data.results || !Array.isArray(data.results)) {
+            console.error("❌ Formato inesperado en búsqueda API:", data);
+            return [];
         }
-        return [];
+        
+        return data.results.map(item => ({
+            titulo: item.titulo || "Sin título",
+            imagen_url: item.imagen_url || "",
+            pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
+            descripcion: item.descripcion || "",
+            fecha_lanzamiento: item.fecha_lanzamiento || "",
+            duracion: item.duracion || "",
+            idioma_original: item.idioma_original || "",
+            popularidad: item.popularidad || 0,
+            puntuacion: item.puntuacion || 0,
+            generos: item.generos || "",
+            año: item.año || "",
+            id: item.id,
+            size: item.size || "",
+            descripcion_detallada: item.descripcion_detallada || "",
+            fuente: "api_externa"
+        }));
+        
     } catch (error) {
-        console.error("❌ Error al buscar en nueva API:", error.message);
+        console.error("❌ Error al buscar en API:", error.message);
         return [];
     }
 }
@@ -378,218 +381,142 @@ app.get("/", (req, res) => {
   });
 });
 
-// 🔧 MEJORADO: Obtiene películas de dos fuentes: local + nueva API
+// 🔧 MEJORADO: Obtiene películas de dos fuentes: local + API externa
 app.get("/peliculas", async (req, res) => {
     try {
-        // Obtener películas de ambas fuentes simultáneamente
-        const [peliculasLocales, peliculasNuevaAPI] = await Promise.all([
-            Promise.resolve(peliculas.map(p => ({ ...p, fuente: "local" }))),
-            obtenerPeliculasDeNuevaAPI()
+        // Obtener películas de ambas fuentes en paralelo
+        const [peliculasLocales, peliculasAPI] = await Promise.all([
+            Promise.resolve(peliculas), // Fuente local
+            obtenerPeliculasDesdeAPI()   // Fuente API externa
         ]);
         
         // Combinar resultados
-        let todasLasPeliculas = [...peliculasLocales, ...peliculasNuevaAPI];
+        let todasLasPeliculas = [...peliculasLocales, ...peliculasAPI];
         
-        // Eliminar duplicados basados en título (simple, se puede mejorar)
-        const seen = new Set();
-        todasLasPeliculas = todasLasPeliculas.filter(item => {
-            const key = item.titulo.toLowerCase();
-            if (seen.has(key)) {
-                return false;
-            }
-            seen.add(key);
-            return true;
-        });
+        // Eliminar duplicados por título (opcional, para mantener limpio)
+        todasLasPeliculas = removeDuplicatesByTitle(todasLasPeliculas);
         
         res.json(todasLasPeliculas);
+        
     } catch (error) {
-        console.error("❌ Error al obtener películas:", error);
-        // Fallback a solo películas locales si hay error
-        res.json(peliculas.map(p => ({ ...p, fuente: "local" })));
+        console.error("❌ Error al combinar fuentes:", error);
+        // Fallback: solo películas locales si algo falla
+        res.json(peliculas);
     }
 });
 
-// 🔧 MEJORADO: Busca en dos fuentes: local + nueva API
+// 🔧 MEJORADO: Busca en dos fuentes: local + API externa
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
   
   try {
-      // Buscar en ambas fuentes simultáneamente
-      const [resultadosLocales, resultadosNuevaAPI] = await Promise.all([
+      // Buscar en ambas fuentes en paralelo
+      const [resultadosLocales, resultadosAPI] = await Promise.all([
           Promise.resolve(peliculas.filter(p =>
             (p.titulo || "").toLowerCase().includes(titulo)
-          ).map(p => ({ ...p, fuente: "local" }))),
-          buscarEnNuevaAPI(tituloRaw)
+          )),
+          buscarPeliculasEnAPI(tituloRaw)
       ]);
       
       // Combinar resultados
-      let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
+      let todosLosResultados = [...resultadosLocales, ...resultadosAPI];
       
-      // Eliminar duplicados
-      const seen = new Set();
-      todosLosResultados = todosLosResultados.filter(item => {
-          const key = item.titulo.toLowerCase();
-          if (seen.has(key)) {
-              return false;
-          }
-          seen.add(key);
-          return true;
-      });
-      
+      // Si hay resultados combinados, devolverlos
       if (todosLosResultados.length > 0) {
           return res.json({ 
-              fuente: "multiple", 
+              fuente: "combinada", 
               total: todosLosResultados.length,
               resultados: todosLosResultados 
           });
       }
       
+      // Si no hay resultados en ninguna fuente
       return res.json({ 
-          fuente: "multiple", 
+          fuente: "local/api", 
           total: 0, 
           resultados: [], 
-          error: "Película no encontrada en ninguna fuente." 
+          error: "Película no encontrada en local ni en API externa." 
       });
       
   } catch (error) {
-      console.error("❌ Error al buscar película:", error);
-      // Fallback a solo búsqueda local
-      const resultadoLocal = peliculas.filter(p =>
+      console.error("❌ Error al buscar en fuentes combinadas:", error);
+      
+      // Fallback: solo búsqueda local si algo falla
+      const resultado = peliculas.filter(p =>
         (p.titulo || "").toLowerCase().includes(titulo)
       );
-      res.json({ fuente: "local_only", resultados: resultadoLocal });
+      
+      if (resultado.length > 0)
+        return res.json({ fuente: "local", resultados: resultado });
+      
+      return res.json({ 
+          fuente: "local", 
+          total: 0, 
+          resultados: [], 
+          error: "Película no encontrada." 
+      });
   }
 });
 
-// 🔎 Búsqueda avanzada (mantenida igual, pero mejorada para usar nueva API)
-app.get("/buscar", async (req, res) => {
+// 🔎 Búsqueda avanzada (MANTENIDA SIN CAMBIOS - solo local)
+app.get("/buscar", (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
-  
-  try {
-      // 1. BÚSQUEDA LOCAL
-      let resultadosLocales = peliculas;
-      
-      if (q) {
-        const ql = q.toLowerCase();
-        resultadosLocales = resultadosLocales.filter(p =>
-          (p.titulo || "").toLowerCase().includes(ql) ||
-          (p.descripcion || "").toLowerCase().includes(ql)
-        );
-      }
-      
-      if (año) resultadosLocales = resultadosLocales.filter(p => String(p.año) === String(año));
-      if (genero)
-        resultadosLocales = resultadosLocales.filter(p =>
-          (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
-        );
-      if (idioma)
-        resultadosLocales = resultadosLocales.filter(
-          p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
-        );
-      if (desde && hasta)
-        resultadosLocales = resultadosLocales.filter(
-          p =>
-            parseInt(p.año) >= parseInt(desde) &&
-            parseInt(p.año) <= parseInt(hasta)
-        );
-      
-      resultadosLocales = resultadosLocales.map(p => ({ ...p, fuente: "local" }));
-      
-      // 2. BÚSQUEDA EN NUEVA API (si hay query)
-      let resultadosNuevaAPI = [];
-      if (q) {
-          resultadosNuevaAPI = await buscarEnNuevaAPI(q);
-      }
-      
-      // Combinar resultados
-      let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
-      
-      // Eliminar duplicados
-      const seen = new Set();
-      todosLosResultados = todosLosResultados.filter(item => {
-          const key = item.titulo.toLowerCase();
-          if (seen.has(key)) {
-              return false;
-          }
-          seen.add(key);
-          return true;
-      });
-      
-      res.json({ 
-          fuente: "multiple", 
-          total: todosLosResultados.length, 
-          resultados: todosLosResultados 
-      });
-      
-  } catch (error) {
-      console.error("❌ Error en búsqueda avanzada:", error);
-      // Fallback a solo búsqueda local
-      let resultados = peliculas;
-      if (q) {
-        const ql = q.toLowerCase();
-        resultados = resultados.filter(p =>
-          (p.titulo || "").toLowerCase().includes(ql) ||
-          (p.descripcion || "").toLowerCase().includes(ql)
-        );
-      }
-      res.json({ fuente: "local_only", total: resultados.length, resultados });
+  let resultados = peliculas;
+
+  if (q) {
+    const ql = q.toLowerCase();
+    resultados = resultados.filter(p =>
+      (p.titulo || "").toLowerCase().includes(ql) ||
+      (p.descripcion || "").toLowerCase().includes(ql)
+    );
   }
+
+  if (año) resultados = resultados.filter(p => String(p.año) === String(año));
+  if (genero)
+    resultados = resultados.filter(p =>
+      (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
+    );
+  if (idioma)
+    resultados = resultados.filter(
+      p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
+    );
+  if (desde && hasta)
+    resultados = resultados.filter(
+      p =>
+        parseInt(p.año) >= parseInt(desde) &&
+        parseInt(p.año) <= parseInt(hasta)
+    );
+    
+  res.json({ fuente: "local", total: resultados.length, resultados });
 });
 
-// 🆕 Búsqueda por Categoría (mejorada para usar nueva API)
-app.get("/peliculas/categoria/:genero", async (req, res) => {
+// 🆕 Búsqueda por Categoría (MANTENIDA SIN CAMBIOS - solo local)
+app.get("/peliculas/categoria/:genero", (req, res) => {
     const generoRaw = decodeURIComponent(req.params.genero || "");
     const generoBuscado = generoRaw.toLowerCase();
 
-    try {
-        // 1. Búsqueda Local
-        let resultadosLocales = peliculas.filter(p =>
-            (p.generos || "").toLowerCase().includes(generoBuscado)
-        ).map(p => ({ ...p, fuente: "local" }));
-        
-        // 2. Obtener todas las películas de nueva API y filtrar por género
-        const peliculasNuevaAPI = await obtenerPeliculasDeNuevaAPI();
-        let resultadosNuevaAPI = peliculasNuevaAPI.filter(p =>
-            (p.generos || "").toLowerCase().includes(generoBuscado)
-        );
-        
-        // Combinar y aleatorizar
-        let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
-        
-        // Eliminar duplicados
-        const seen = new Set();
-        todosLosResultados = todosLosResultados.filter(item => {
-            const key = item.titulo.toLowerCase();
-            if (seen.has(key)) {
-                return false;
-            }
-            seen.add(key);
-            return true;
-        });
-        
+    let resultados = peliculas.filter(p =>
+        (p.generos || "").toLowerCase().includes(generoBuscado)
+    );
+    
+    if (resultados.length > 0) {
         return res.json({ 
-            fuente: "multiple", 
-            total: todosLosResultados.length, 
-            resultados: shuffleArray(todosLosResultados) 
-        });
-        
-    } catch (error) {
-        console.error("❌ Error al buscar por categoría:", error);
-        // Fallback a solo búsqueda local
-        let resultados = peliculas.filter(p =>
-            (p.generos || "").toLowerCase().includes(generoBuscado)
-        );
-        return res.json({ 
-            fuente: "local_only", 
+            fuente: "local", 
             total: resultados.length, 
             resultados: shuffleArray(resultados) 
         });
     }
+    
+    return res.json({ 
+        fuente: "local", 
+        total: 0, 
+        resultados: [], 
+        error: "Categoría no encontrada." 
+    });
 });
 
-
-// ------------------- RUTAS DE USUARIOS (sin cambios) -------------------
+// ------------------- RUTAS DE USUARIOS (SIN CAMBIOS) -------------------
 app.get("/user/get", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta parámetro email" });
@@ -612,8 +539,8 @@ app.get("/user/setplan", (req, res) => {
 // Favoritos
 app.get("/user/add_favorite", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query; // Capturar la URL cruda
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
   
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
@@ -633,7 +560,6 @@ app.get("/user/favorites", (req, res) => {
   res.json({ total: user.favorites.length, favorites: user.favorites });
 });
 
-// ELIMINAR TODOS LOS FAVORITOS
 app.get("/user/favorites/clear", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta email" });
@@ -641,13 +567,12 @@ app.get("/user/favorites/clear", (req, res) => {
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
-  user.favorites = []; // Vaciar el array de favoritos
+  user.favorites = [];
   saveUser(email, user);
   
   res.json({ ok: true, message: "Lista de favoritos eliminada." });
 });
 
-// ELIMINAR UNA PELÍCULA DE FAVORITOS
 app.get("/user/favorites/remove", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const raw_pelicula_url = req.query.pelicula_url;
@@ -660,7 +585,6 @@ app.get("/user/favorites/remove", (req, res) => {
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.favorites.length;
-  // Filtrar favoritos para excluir la película con esa URL
   user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
   
   if (user.favorites.length < initialLength) {
@@ -673,8 +597,8 @@ app.get("/user/favorites/remove", (req, res) => {
 // Historial
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query; // Capturar la URL cruda
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
   
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
@@ -693,7 +617,6 @@ app.get("/user/history", (req, res) => {
   res.json({ total: user.history.length, history: user.history });
 });
 
-// ELIMINAR TODO EL HISTORIAL
 app.get("/user/history/clear", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta email" });
@@ -701,13 +624,12 @@ app.get("/user/history/clear", (req, res) => {
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
-  user.history = []; // Vaciar el array del historial
+  user.history = [];
   saveUser(email, user);
   
   res.json({ ok: true, message: "Historial de películas eliminado." });
 });
 
-// ELIMINAR UNA PELÍCULA DEL HISTORIAL
 app.get("/user/history/remove", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const raw_pelicula_url = req.query.pelicula_url;
@@ -720,7 +642,6 @@ app.get("/user/history/remove", (req, res) => {
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.history.length;
-  // Filtrar el historial para excluir la película con esa URL
   user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
   
   if (user.history.length < initialLength) {
@@ -730,10 +651,7 @@ app.get("/user/history/remove", (req, res) => {
   res.status(404).json({ ok: false, message: "Película no encontrada en el historial." });
 });
 
-
-// ------------------- ENDPOINTS DE REFRESH (modificados para usar nueva API) -------------------
-
-// 🔁 Refrescar historial (uno o todos)
+// ------------------- ENDPOINTS DE REFRESH (MANTENIDOS) -------------------
 app.get("/user/history/refresh", async (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const titulo = req.query.titulo || null;
@@ -746,12 +664,11 @@ app.get("/user/history/refresh", async (req, res) => {
 
   const refreshed = [];
   for (const h of toRefresh) {
-    // Buscar en nueva API
-    const resultados = await buscarEnNuevaAPI(h.titulo);
-    if (resultados.length > 0) {
-      refreshed.push(resultados[0]); // Tomar el primer resultado
+    const resultadosAPI = await buscarPeliculasEnAPI(h.titulo);
+    if (resultadosAPI.length > 0) {
+      refreshed.push(resultadosAPI[0]);
     } else {
-      refreshed.push(h); // Mantener el antiguo si no hay resultados
+      refreshed.push(h);
     }
   }
 
@@ -760,7 +677,6 @@ app.get("/user/history/refresh", async (req, res) => {
   res.json({ ok: true, refreshed });
 });
 
-// 🔁 Refrescar favoritos (uno o todos)
 app.get("/user/favorites/refresh", async (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   const titulo = req.query.titulo || null;
@@ -773,11 +689,11 @@ app.get("/user/favorites/refresh", async (req, res) => {
 
   const refreshed = [];
   for (const f of toRefresh) {
-    const resultados = await buscarEnNuevaAPI(f.titulo);
-    if (resultados.length > 0) {
-      refreshed.push(resultados[0]);
+    const resultadosAPI = await buscarPeliculasEnAPI(f.titulo);
+    if (resultadosAPI.length > 0) {
+      refreshed.push(resultadosAPI[0]);
     } else {
-      refreshed.push(f); // Mantener el antiguo si falla la actualización
+      refreshed.push(f);
     }
   }
 
@@ -800,7 +716,6 @@ app.get("/user/profile", (req, res) => {
     totalHistorial: user.history.length,
     ultimaActividad:
       user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
-    // 🆕 Incluir información de la última actividad del latido
     ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos", 
   };
   res.json({ perfil });
@@ -823,7 +738,6 @@ app.get("/user/activity", (req, res) => {
     fecha: f.addedAt
   }));
   
-  // 🆕 Incluir actividad de resumen de reproducción
   const resumen = Object.values(user.resume).map(r => ({
     tipo: "reproduccion_resumen",
     titulo: r.titulo,
@@ -839,17 +753,7 @@ app.get("/user/activity", (req, res) => {
   res.json({ total: actividad.length, actividad });
 });
 
-
 // ------------------- ENDPOINTS DE SEGUIMIENTO DE STREAMING (LATIDOS) -------------------
-
-/**
- * 🆕 Sistema de seguimiento de latidos (heartbeat) para el progreso de streaming.
- * @param email - Correo del usuario.
- * @param pelicula_url - URL de la película (como clave única).
- * @param titulo - Título de la película.
- * @param currentTime - Tiempo actual de reproducción (en segundos).
- * @param totalDuration - Duración total de la película (en segundos).
- */
 app.get("/user/heartbeat", (req, res) => {
     const email = (req.query.email || "").toLowerCase();
     const raw_pelicula_url = req.query.pelicula_url;
@@ -864,19 +768,13 @@ app.get("/user/heartbeat", (req, res) => {
     }
     
     const user = getOrCreateUser(email);
-    user.lastActivityTimestamp = new Date().toISOString(); // Actualiza la actividad global del usuario
+    user.lastActivityTimestamp = new Date().toISOString();
 
-    // 🔑 Clave única para el resumen de reproducción
     const key = pelicula_url;
-
-    // Calcula el porcentaje visto
     const percentage = (currentTime / totalDuration) * 100;
-
-    // Umbral para considerar "vista completa" (por ejemplo, 90%)
     const IS_COMPLETE_THRESHOLD = 90; 
     const isComplete = percentage >= IS_COMPLETE_THRESHOLD;
     
-    // Almacenar/actualizar el resumen de la reproducción
     user.resume[key] = {
         titulo: titulo,
         pelicula_url: pelicula_url,
@@ -896,13 +794,6 @@ app.get("/user/heartbeat", (req, res) => {
     });
 });
 
-/**
- * 🆕 Endpoint para verificar si una película ha sido vista y consumir 1 crédito.
- * Solo consume el crédito si el plan es 'creditos' y la película está marcada como 'vista completa' 
- * en el resumen de reproducción (isComplete: true).
- * @param email - Correo del usuario.
- * @param pelicula_url - URL de la película.
- */
 app.get("/user/consume_credit", (req, res) => {
     const email = (req.query.email || "").toLowerCase();
     const raw_pelicula_url = req.query.pelicula_url;
@@ -949,10 +840,7 @@ app.get("/user/consume_credit", (req, res) => {
         });
     }
 
-    // 1. Consumir el crédito
     user.credits -= 1;
-    
-    // 2. Marcar el resumen como "crédito consumido" para evitar doble cobro
     resumeEntry.creditConsumed = true; 
     
     saveUser(email, user);
@@ -967,10 +855,8 @@ app.get("/user/consume_credit", (req, res) => {
 
 // ------------------- INICIAR SERVIDOR -------------------
 async function startServer() {
-  // 1. Intentar cargar los datos de usuario desde GitHub
   await loadUsersDataFromGitHub();
   
-  // 2. Iniciar el servidor
   const PORT = process.env.PORT || 8080;
   app.listen(PORT, () => console.log(`✅ Servidor corriendo en http://localhost:${PORT}`));
 }

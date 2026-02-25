@@ -17,9 +17,6 @@ const BACKUP_FILE_NAME = "users_data.json";
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
 const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
 
-// URL de la API externa para búsqueda y películas
-const EXTERNAL_API_BASE = "https://peliprex.fly.dev";
-
 // ------------------- FUNCIONES AUXILIARES -------------------
 
 /** Limpia la URL de la película eliminando la duplicidad '/prepreview' para corregir a '/preview'. */
@@ -295,269 +292,99 @@ setInterval(() => {
 }, MS_IN_24_HOURS); // Ejecutar cada 24 horas
 
 
-// ------------------- FUNCIONES PARA CONSULTAR API EXTERNA -------------------
-
-/**
- * Obtiene todas las películas desde la API externa
- */
-async function obtenerPeliculasExternas() {
-  try {
-    const response = await fetch(`${EXTERNAL_API_BASE}/peliculas`);
-    if (!response.ok) {
-      console.error(`❌ Error al obtener películas externas: ${response.status}`);
-      return [];
-    }
-    const data = await response.json();
-    console.log(`✅ Cargadas ${data.length} películas desde API externa`);
-    return data;
-  } catch (error) {
-    console.error("❌ Error al conectar con API externa:", error.message);
-    return [];
-  }
-}
-
-/**
- * Busca películas en la API externa por query
- */
-async function buscarEnApiExterna(query) {
-  if (!query) return [];
-  
-  try {
-    const response = await fetch(`${EXTERNAL_API_BASE}/search?q=${encodeURIComponent(query)}`);
-    if (!response.ok) {
-      console.error(`❌ Error al buscar en API externa: ${response.status}`);
-      return [];
-    }
-    const data = await response.json();
-    return data.resultados || [];
-  } catch (error) {
-    console.error("❌ Error al buscar en API externa:", error.message);
-    return [];
-  }
-}
-
-/**
- * Busca una película específica por título en la API externa
- */
-async function buscarPeliculaEnApiExterna(titulo) {
-  if (!titulo) return null;
-  
-  try {
-    const resultados = await buscarEnApiExterna(titulo);
-    return resultados.length > 0 ? resultados[0] : null;
-  } catch (error) {
-    console.error("❌ Error al buscar película específica en API externa:", error.message);
-    return null;
-  }
-}
-
-/**
- * Obtiene películas por categoría desde la API externa
- */
-async function obtenerPeliculasPorCategoriaExterna(genero) {
-  try {
-    const response = await fetch(`${EXTERNAL_API_BASE}/peliculas/categoria/${encodeURIComponent(genero)}`);
-    if (!response.ok) {
-      console.error(`❌ Error al obtener películas por categoría externa: ${response.status}`);
-      return [];
-    }
-    const data = await response.json();
-    return data.resultados || [];
-  } catch (error) {
-    console.error("❌ Error al obtener películas por categoría externa:", error.message);
-    return [];
-  }
-}
-
-
 // ------------------- RUTAS PRINCIPALES -------------------
 app.get("/", (req, res) => {
   res.json({
     mensaje: "🎬 API de Películas funcionando correctamente",
-    total_local: peliculas.length,
+    total: peliculas.length,
     ejemplo: "/peliculas o /peliculas/El%20Padrino"
   });
 });
 
-// Endpoint para obtener todas las películas (combinadas)
-app.get("/peliculas", async (req, res) => {
-  // Obtener películas externas
-  const peliculasExternas = await obtenerPeliculasExternas();
-  
-  // Combinar con películas locales
-  const todasLasPeliculas = [...peliculas, ...peliculasExternas];
-  
-  // Eliminar duplicados por título (simple, se puede mejorar)
-  const sinDuplicados = [];
-  const titulosVistos = new Set();
-  
-  for (const peli of todasLasPeliculas) {
-    if (!titulosVistos.has(peli.titulo?.toLowerCase())) {
-      titulosVistos.add(peli.titulo?.toLowerCase());
-      sinDuplicados.push(peli);
-    }
-  }
-  
-  res.json(sinDuplicados);
-});
+app.get("/peliculas", (req, res) => res.json(peliculas));
 
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
-  
-  // Buscar en local
-  const resultadoLocal = peliculas.filter(p =>
+  const resultado = peliculas.filter(p =>
     (p.titulo || "").toLowerCase().includes(titulo)
   );
 
-  if (resultadoLocal.length > 0) {
-    return res.json({ fuente: "local", resultados: resultadoLocal });
-  }
+  if (resultado.length > 0)
+    return res.json({ fuente: "local", resultados: resultado });
 
-  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON. Buscando en API externa...`);
-  
-  // Buscar en API externa
-  try {
-    const resultadoExterno = await buscarPeliculaEnApiExterna(tituloRaw);
-    if (resultadoExterno) {
-      return res.json({ fuente: "externa", resultados: [resultadoExterno] });
-    }
-    
-    // Si no hay resultados
-    return res.json({ 
-        fuente: "local/externa", 
-        total: 0, 
-        resultados: [], 
-        error: "Película no encontrada en local ni en API externa." 
-    });
-  } catch (error) {
-    console.error("❌ Error al buscar en API externa:", error);
-    res.status(500).json({ error: "Error al consultar API externa." });
-  }
+  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON.`);
+  return res.json({ 
+      fuente: "local", 
+      total: 0, 
+      resultados: [], 
+      error: "Película no encontrada en local." 
+  });
 });
 
-// 🔎 Búsqueda avanzada (MEJORADA: busca en ambas fuentes)
+// 🔎 Búsqueda avanzada
 app.get("/buscar", async (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
-  
-  // --- 1. BÚSQUEDA LOCAL ---
-  let resultadosLocales = peliculas;
+  let resultados = peliculas;
 
+  // --- 1. BÚSQUEDA LOCAL ---
   if (q) {
     const ql = q.toLowerCase();
-    resultadosLocales = resultadosLocales.filter(p =>
+    resultados = resultados.filter(p =>
       (p.titulo || "").toLowerCase().includes(ql) ||
       (p.descripcion || "").toLowerCase().includes(ql)
     );
   }
 
-  if (año) resultadosLocales = resultadosLocales.filter(p => String(p.año) === String(año));
+  if (año) resultados = resultados.filter(p => String(p.año) === String(año));
   if (genero)
-    resultadosLocales = resultadosLocales.filter(p =>
+    resultados = resultados.filter(p =>
       (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
     );
   if (idioma)
-    resultadosLocales = resultadosLocales.filter(
+    resultados = resultados.filter(
       p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
     );
   if (desde && hasta)
-    resultadosLocales = resultadosLocales.filter(
+    resultados = resultados.filter(
       p =>
         parseInt(p.año) >= parseInt(desde) &&
         parseInt(p.año) <= parseInt(hasta)
     );
-  
-  // --- 2. BÚSQUEDA EN API EXTERNA ---
-  let resultadosExternos = [];
-  if (q) {
-    console.log(`🔎 Buscando también en API externa con query: "${q}"`);
-    resultadosExternos = await buscarEnApiExterna(q);
     
-    // Aplicar filtros adicionales a los resultados externos (si es posible)
-    // Nota: la API externa puede no soportar todos los filtros
-  }
-  
-  // --- 3. COMBINAR RESULTADOS ---
-  const todosLosResultados = [...resultadosLocales, ...resultadosExternos];
-  
-  // Eliminar duplicados por título
-  const sinDuplicados = [];
-  const titulosVistos = new Set();
-  
-  for (const peli of todosLosResultados) {
-    if (!titulosVistos.has(peli.titulo?.toLowerCase())) {
-      titulosVistos.add(peli.titulo?.toLowerCase());
-      sinDuplicados.push(peli);
-    }
-  }
-  
-  if (sinDuplicados.length > 0) {
-    const fuentes = [];
-    if (resultadosLocales.length > 0) fuentes.push("local");
-    if (resultadosExternos.length > 0) fuentes.push("externa");
-    
-    return res.json({ 
-      fuente: fuentes.join("/"), 
-      total: sinDuplicados.length, 
-      resultados: sinDuplicados 
-    });
+  if (resultados.length > 0) {
+    return res.json({ fuente: "local", total: resultados.length, resultados });
   }
 
-  // Si no hay resultados
-  res.json({ 
-    fuente: "local/externa", 
-    total: 0, 
-    resultados: [], 
-    error: "No se encontraron películas con los criterios de búsqueda." 
-  });
+  // Si no hay resultados en local
+  res.json({ fuente: "local", total: 0, resultados: [], error: "No se encontraron películas con los criterios de búsqueda en local." });
 });
 
-// 🆕 NUEVO ENDPOINT: Búsqueda por Categoría (Género) - MEJORADO
+// 🆕 NUEVO ENDPOINT: Búsqueda por Categoría (Género)
 app.get("/peliculas/categoria/:genero", async (req, res) => {
     const generoRaw = decodeURIComponent(req.params.genero || "");
     const generoBuscado = generoRaw.toLowerCase();
 
     // 1. Búsqueda Local
-    let resultadosLocales = peliculas.filter(p =>
+    let resultados = peliculas.filter(p =>
         (p.generos || "").toLowerCase().includes(generoBuscado)
     );
     
-    // 2. Búsqueda en API Externa
-    console.log(`🔎 Buscando categoría "${generoRaw}" en API externa...`);
-    let resultadosExternos = await obtenerPeliculasPorCategoriaExterna(generoRaw);
-    
-    // 3. Combinar resultados
-    const todosLosResultados = [...resultadosLocales, ...resultadosExternos];
-    
-    // Eliminar duplicados por título
-    const sinDuplicados = [];
-    const titulosVistos = new Set();
-    
-    for (const peli of todosLosResultados) {
-      if (!titulosVistos.has(peli.titulo?.toLowerCase())) {
-        titulosVistos.add(peli.titulo?.toLowerCase());
-        sinDuplicados.push(peli);
-      }
-    }
-    
-    if (sinDuplicados.length > 0) {
-        const fuentes = [];
-        if (resultadosLocales.length > 0) fuentes.push("local");
-        if (resultadosExternos.length > 0) fuentes.push("externa");
-        
+    // Aleatorizar los resultados locales (si existen)
+    if (resultados.length > 0) {
         return res.json({ 
-            fuente: fuentes.join("/"), 
-            total: sinDuplicados.length, 
-            resultados: shuffleArray(sinDuplicados) 
+            fuente: "local", 
+            total: resultados.length, 
+            resultados: shuffleArray(resultados) 
         });
     }
     
-    // Si no hay resultados
+    console.log(`🔎 No se encontró la categoría "${generoRaw}" en el JSON.`);
     return res.json({ 
-        fuente: "local/externa", 
+        fuente: "local", 
         total: 0, 
         resultados: [], 
-        error: "No se encontraron películas en la categoría." 
+        error: "No se encontraron películas en la categoría solicitada." 
     });
 });
 
@@ -585,8 +412,8 @@ app.get("/user/setplan", (req, res) => {
 // Favoritos
 app.get("/user/add_favorite", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query;
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
   
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
@@ -614,7 +441,7 @@ app.get("/user/favorites/clear", (req, res) => {
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
-  user.favorites = [];
+  user.favorites = []; // Vaciar el array de favoritos
   saveUser(email, user);
   
   res.json({ ok: true, message: "Lista de favoritos eliminada." });
@@ -633,6 +460,7 @@ app.get("/user/favorites/remove", (req, res) => {
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.favorites.length;
+  // Filtrar favoritos para excluir la película con esa URL
   user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
   
   if (user.favorites.length < initialLength) {
@@ -645,8 +473,8 @@ app.get("/user/favorites/remove", (req, res) => {
 // Historial
 app.get("/user/add_history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query;
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
   
   if (!email || !titulo || !pelicula_url)
     return res.status(400).json({ error: "Faltan parámetros" });
@@ -673,7 +501,7 @@ app.get("/user/history/clear", (req, res) => {
   const user = getOrCreateUser(email);
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
-  user.history = [];
+  user.history = []; // Vaciar el array del historial
   saveUser(email, user);
   
   res.json({ ok: true, message: "Historial de películas eliminado." });
@@ -692,6 +520,7 @@ app.get("/user/history/remove", (req, res) => {
   if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
   
   const initialLength = user.history.length;
+  // Filtrar el historial para excluir la película con esa URL
   user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
   
   if (user.history.length < initialLength) {
@@ -715,16 +544,9 @@ app.get("/user/history/refresh", async (req, res) => {
     ? user.history.filter(h => h.titulo === titulo)
     : user.history;
 
-  const refreshed = [];
-  for (const h of toRefresh) {
-    const nueva = await buscarPeliculaEnApiExterna(h.titulo);
-    if (nueva) refreshed.push(nueva);
-    else refreshed.push(h);
-  }
-
-  if (!titulo) user.history = refreshed;
+  if (!titulo) user.history = toRefresh;
   saveUser(email, user);
-  res.json({ ok: true, refreshed });
+  res.json({ ok: true, refreshed: toRefresh });
 });
 
 // 🔁 Refrescar favoritos (uno o todos)
@@ -738,16 +560,9 @@ app.get("/user/favorites/refresh", async (req, res) => {
     ? user.favorites.filter(f => f.titulo === titulo)
     : user.favorites;
 
-  const refreshed = [];
-  for (const f of toRefresh) {
-    const nueva = await buscarPeliculaEnApiExterna(f.titulo);
-    if (nueva) refreshed.push(nueva);
-    else refreshed.push(f);
-  }
-
-  if (!titulo) user.favorites = refreshed;
+  if (!titulo) user.favorites = toRefresh;
   saveUser(email, user);
-  res.json({ ok: true, refreshed });
+  res.json({ ok: true, refreshed: toRefresh });
 });
 
 // 📊 Perfil con estadísticas
@@ -764,7 +579,8 @@ app.get("/user/profile", (req, res) => {
     totalHistorial: user.history.length,
     ultimaActividad:
       user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
-    ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos",
+    // 🆕 Incluir información de la última actividad del latido
+    ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos", 
   };
   res.json({ perfil });
 });
@@ -786,6 +602,7 @@ app.get("/user/activity", (req, res) => {
     fecha: f.addedAt
   }));
   
+  // 🆕 Incluir actividad de resumen de reproducción
   const resumen = Object.values(user.resume).map(r => ({
     tipo: "reproduccion_resumen",
     titulo: r.titulo,
@@ -826,14 +643,19 @@ app.get("/user/heartbeat", (req, res) => {
     }
     
     const user = getOrCreateUser(email);
-    user.lastActivityTimestamp = new Date().toISOString();
+    user.lastActivityTimestamp = new Date().toISOString(); // Actualiza la actividad global del usuario
 
+    // 🔑 Clave única para el resumen de reproducción
     const key = pelicula_url;
 
+    // Calcula el porcentaje visto
     const percentage = (currentTime / totalDuration) * 100;
+
+    // Umbral para considerar "vista completa" (por ejemplo, 90%)
     const IS_COMPLETE_THRESHOLD = 90; 
     const isComplete = percentage >= IS_COMPLETE_THRESHOLD;
     
+    // Almacenar/actualizar el resumen de la reproducción
     user.resume[key] = {
         titulo: titulo,
         pelicula_url: pelicula_url,
@@ -906,7 +728,10 @@ app.get("/user/consume_credit", (req, res) => {
         });
     }
 
+    // 1. Consumir el crédito
     user.credits -= 1;
+    
+    // 2. Marcar el resumen como "crédito consumido" para evitar doble cobro
     resumeEntry.creditConsumed = true; 
     
     saveUser(email, user);
@@ -918,7 +743,6 @@ app.get("/user/consume_credit", (req, res) => {
         message: "Crédito consumido exitosamente. La película se marcó como vista completa." 
     });
 });
-
 
 // ------------------- INICIAR SERVIDOR -------------------
 async function startServer() {

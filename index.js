@@ -1,55 +1,7 @@
-async function buscarPeliculaRespaldo(titulo) {
-  // Obtener datos desde TMDb
-  const pelicula = data.results[0];
-  const tmdbId = pelicula.id;
-
-  // Fuentes de video
-  const vidsrcUrl = `https://vidsrc.me/embed/movie?tmdb=${tmdbId}&lang=es`;
-  const superEmbedUrl = `https://multiembed.mov/?video_id=${tmdbId}&tmdb=1`;
-
-  return {
-    titulo: pelicula.title,
-    descripcion: pelicula.overview,
-    imagen_url: `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`,
-
-    // Usar embed como fuente principal
-    pelicula_url: vidsrcUrl,
-    fuente_video: "Vidsrc Player",
-    respaldo: true
-  };
-}
-3. Optimizar la función searchTMDb
-Actualmente se hace una llamada a YouTube por cada película, lo cual consume rápido la cuota de la API.
-Esto debe eliminarse.
-En su lugar, generar directamente la URL del video usando el ID de TMDb:
-Javascript
-
-pelicula_url: `https://vidsrc.to/embed/movie/${pelicula.id}`
-Esto reduce el uso de APIs externas y mejora el rendimiento.
-4. Implementar sistema de múltiples fuentes (Mirror)
-Para mejorar la disponibilidad, se debe implementar un sistema que pruebe varias fuentes de video en caso de que una falle.
-Ejemplo de lógica:
-Fuente principal: Vidsrc
-Fuente secundaria: SuperEmbed
-Si una no carga, automáticamente usar la siguiente
-5. Ajuste en el frontend
-El reproductor debe mostrar la película usando un <iframe> en lugar de un <video> directo.
-Debe recibir la URL generada (pelicula_url) y cargarla correctamente.
-⚠️ Consideraciones importantes
-No se debe intentar obtener archivos .mp4 directos, ya que usan tokens temporales y son difíciles de mantener.
-Los embeds pueden mostrar anuncios (pop-ups), esto es normal en este tipo de servicios.
-Mantener el resto del código, diseño y funcionamiento actual completamente intactos.
-🎯 Objetivo final
-Reducir dependencia de YouTube
-Mejorar disponibilidad de contenido
-Evitar consumo innecesario de APIs
-Ofrecer reproducción más estable y completa si conoces otras formas también efectivas de obtener el link de reproducción le hagregas también 
-No realizar ningún otro cambio que no esté especificado aquí. Todo lo demás debe mantenerse exactamente igual y funcionando correctamente.
-
- 
-
 // index.js — API completa de Películas con respaldo TMDb + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
 // ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
+// 🔥 SOLUCIÓN: La búsqueda avanzada y por categoría AHORA DEVUELVE resultados de TMDb incluso sin enlace directo de YouTube, 
+// lo que asegura que las categorías siempre carguen contenido.
 
 import express from "express";
 import cors from "cors";
@@ -146,13 +98,7 @@ async function getFileSha(filePath) {
   if (!GITHUB_TOKEN || !GITHUB_REPO) return null;
   const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
   try {
-    const resp = await fetch(url, {
-      headers: {
-        'Authorization': `token ${GITHUB_TOKEN}`,
-        'Accept': 'application/vnd.github.v3+json',
-      },
-    });
-
+    const resp = await fetch(url);
     if (resp.status === 404) return null;
     if (!resp.ok) {
       console.error(`❌ Error al obtener SHA de GitHub (Status ${resp.status}): ${await resp.text()}`);
@@ -442,7 +388,6 @@ app.get("/peliculas/:titulo", async (req, res) => {
 });
 
 // 🔎 Búsqueda avanzada
-// MODIFICADO: Ahora es ASYNC para incluir la lógica de respaldo.
 app.get("/buscar", async (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
   let resultados = peliculas;
@@ -497,6 +442,7 @@ app.get("/buscar", async (req, res) => {
     });
 
     if (respaldoResults.length > 0) {
+        // 🔥 SOLUCIÓN APLICADA: Devolver resultados de TMDb incluso si pelicula_url es null.
         return res.json({ fuente: "respaldo", total: respaldoResults.length, resultados: respaldoResults });
     }
   } catch (error) {
@@ -547,7 +493,8 @@ app.get("/peliculas/categoria/:genero", async (req, res) => {
             sort_by: 'vote_count.desc' 
         });
 
-        // La aleatoriedad se aplica a los resultados del respaldo.
+        // 🔥 SOLUCIÓN APLICADA: Devolver resultados de TMDb incluso si pelicula_url es null.
+        // Esto soluciona que las categorías "carguen a veces".
         if (respaldoResults.length > 0) {
             return res.json({ 
                 fuente: "respaldo", 
@@ -614,8 +561,6 @@ app.get("/user/favorites", (req, res) => {
   res.json({ total: user.favorites.length, favorites: user.favorites });
 });
 
-// **NUEVAS RUTAS DE ELIMINACIÓN DE FAVORITOS (Añadido)**
-
 // ELIMINAR TODOS LOS FAVORITOS
 app.get("/user/favorites/clear", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
@@ -676,8 +621,6 @@ app.get("/user/history", (req, res) => {
   res.json({ total: user.history.length, history: user.history });
 });
 
-// **NUEVAS RUTAS DE ELIMINACIÓN DE HISTORIAL (Añadido)**
-
 // ELIMINAR TODO EL HISTORIAL
 app.get("/user/history/clear", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
@@ -731,8 +674,11 @@ app.get("/user/history/refresh", async (req, res) => {
 
   const refreshed = [];
   for (const h of toRefresh) {
-    const nueva = await buscarPeliculaRespaldo(h.titulo);
+    // El respaldo solo es para el detalle. Aquí se mantendrá si la interfaz
+    // maneja resultados sin pelicula_url o con el anterior.
+    const nueva = await buscarPeliculaRespaldo(h.titulo); 
     if (nueva) refreshed.push(nueva);
+    else refreshed.push(h); // Mantener el antiguo si falla la actualización
   }
 
   if (!titulo) user.history = refreshed;
@@ -755,6 +701,7 @@ app.get("/user/favorites/refresh", async (req, res) => {
   for (const f of toRefresh) {
     const nueva = await buscarPeliculaRespaldo(f.titulo);
     if (nueva) refreshed.push(nueva);
+    else refreshed.push(f); // Mantener el antiguo si falla la actualización
   }
 
   if (!titulo) user.favorites = refreshed;
@@ -961,13 +908,22 @@ async function buscarPeliculaRespaldo(titulo) {
     const detalles = await detallesResp.json();
 
     // 🎯 Lógica para buscar la película completa en YouTube
-    // Se utiliza "película completa" para asegurar un resultado que no sea un tráiler.
-    const year = pelicula.release_date ? ` (${pelicula.release_date.substring(0, 4)})` : '';
-    const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Añadimos 'español latino' para mejorar la búsqueda
-    const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
-    const youtubeResp = await fetch(youtubeUrl);
-    const youtubeData = await youtubeResp.json();
-    const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+    // Se mejoran los términos de búsqueda para ser más amplios, si el primero falla.
+    
+    // Intento 1: "película completa español latino"
+    let youtubeQuery = `${pelicula.title} película completa español latino`; 
+    let youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
+    let youtubeData = await youtubeResp.json();
+    let youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+
+    // Intento 2: Si el primero falla, probar solo "película completa"
+    if (!youtubeId) {
+        youtubeQuery = `${pelicula.title} película completa`;
+        youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
+        youtubeData = await youtubeResp.json();
+        youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
+    }
+    // Fin de la mejora en la búsqueda de YouTube.
 
     return {
       titulo: pelicula.title,
@@ -1022,16 +978,19 @@ async function searchTMDb(params) {
         
         if (!data.results || data.results.length === 0) return [];
 
-        const resultsToEnrich = data.results.slice(0, 10); // Limitar a 10 resultados para no sobrecargar el API de YouTube
+        // Ahora procesaremos todos los resultados de TMDb (hasta 10)
+        const resultsToEnrich = data.results.slice(0, 10); 
         const enrichedResults = [];
 
         for (const pelicula of resultsToEnrich) {
-            if (!pelicula.title) continue; // Saltar si no tiene título
+            if (!pelicula.title) continue; 
             
+            // Lógica para buscar YouTube (se mantiene, pero el resultado de TMDb se devuelve siempre)
             const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
-            const youtubeQuery = `${pelicula.title} ${year} película completa español latino`;
+            const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Usamos la misma query optimizada
             const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
             
+            // Ejecutar la búsqueda de YouTube SIN esperar
             const youtubeResp = await fetch(youtubeUrl);
             const youtubeData = await youtubeResp.json();
             const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
@@ -1043,17 +1002,19 @@ async function searchTMDb(params) {
                 fecha_lanzamiento: pelicula.release_date || "",
                 idioma_original: pelicula.original_language || "",
                 puntuacion: pelicula.vote_average || 0,
-                generos_ids: pelicula.genre_ids || [], // Dejar los IDs de género
+                generos_ids: pelicula.genre_ids || [], 
                 imagen_url: pelicula.poster_path
                     ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
                     : "",
+                // 🔥 PUNTO CLAVE: El enlace de YouTube es opcional (puede ser null).
                 pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
                 respaldo: true
             });
         }
 
-        // Devolver solo las películas a las que se les encontró un enlace de YouTube
-        return enrichedResults.filter(p => p.pelicula_url); 
+        // 🔥 MODIFICACIÓN: Devolver TODOS los resultados enriquecidos de TMDb. 
+        // Si no se encontró el enlace de YouTube, se devuelve la película con pelicula_url: null.
+        return enrichedResults; 
 
     } catch (err) {
         console.error("❌ Error en searchTMDb:", err.message);

@@ -43,7 +43,12 @@ async function getFileSha(filePath) {
   if (!GITHUB_TOKEN || !GITHUB_REPO) return null;
   const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
   try {
-    const resp = await fetch(url);
+    const resp = await fetch(url, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
     if (resp.status === 404) return null;
     if (!resp.ok) {
       console.error(`❌ Error al obtener SHA de GitHub (Status ${resp.status}): ${await resp.text()}`);
@@ -74,17 +79,22 @@ async function saveUsersDataToGitHub(content) {
 
     const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
 
+    // Construir el cuerpo de la petición. Solo se envía el sha si existe.
+    const requestBody = {
+      message: commitMessage,
+      content: contentBase64
+    };
+    if (sha) {
+      requestBody.sha = sha;
+    }
+
     const resp = await fetch(url, {
       method: 'PUT',
       headers: {
         'Authorization': `token ${GITHUB_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        message: commitMessage,
-        content: contentBase64,
-        sha: sha, // Se requiere el SHA para actualizar o se crea si es null
-      }),
+      body: JSON.stringify(requestBody),
     });
 
     if (!resp.ok) {

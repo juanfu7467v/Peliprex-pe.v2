@@ -1,7 +1,6 @@
-// index.js — API completa de Películas con respaldo TMDb + YouTube + sistema de usuarios + nuevos endpoints MaguisTV style
-// ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos y NUEVAS BÚSQUEDAS DE RESPALDO!
-// 🔥 SOLUCIÓN: La búsqueda avanzada y por categoría AHORA DEVUELVE resultados de TMDb incluso sin enlace directo de YouTube, 
-// lo que asegura que las categorías siempre carguen contenido.
+// index.js — API completa de Películas + nuevas fuentes de datos
+// ¡MEJORADO con Respaldo en GitHub para Historial y Favoritos!
+// 🔥 MODIFICADO: Eliminadas APIs de TMDB y YouTube, agregada nueva fuente de datos
 
 import express from "express";
 import cors from "cors";
@@ -17,15 +16,6 @@ app.use(cors());
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
 const BACKUP_FILE_NAME = "users_data.json";
-
-// 🔑 Claves de API (Obtenidas de Variables de Entorno/Secrets)
-// Asegúrate de configurar TMDB_API_KEY y YOUTUBE_API_KEY en tus secretos/variables de entorno.
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-
-if (!TMDB_API_KEY) console.error("❌ ERROR: La variable de entorno TMDB_API_KEY no está configurada.");
-if (!YOUTUBE_API_KEY) console.error("❌ ERROR: La variable de entorno YOUTUBE_API_KEY no está configurada.");
-
 
 // 📂 Archivos locales (Mantenidos)
 const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
@@ -49,47 +39,6 @@ function shuffleArray(array) {
     }
     return array;
 }
-
-// Mapeo de las categorías del usuario a los IDs de Género de TMDb.
-// Para categorías compuestas, se usan los IDs separados por coma (ej. Comedia Romántica: "35,10749").
-const TMDB_GENRE_MAP = {
-    "accion": 28,
-    "aventura": 12,
-    "animacion": 16,
-    "comedia": 35,
-    "crimen": 80,
-    "documental": 99,
-    "drama": 18,
-    "familia": 10751,
-    "fantasia": 14,
-    "historia": 36,
-    "terror": 27,
-    "musica": 10402,
-    "misterio": 9648,
-    "romance": 10749,
-    "ciencia ficcion": 878,
-    "thriller (suspenso)": 53,
-    "guerra": 10752,
-    "western (vaqueros)": 37,
-    "deportes": 99, // Documental
-    "biografia": 18, // Drama
-    "musical": 10402,
-    "politica": 18, // Drama
-    "cine independiente": 18, // Drama
-    "superheroes": 28, // Action
-    "cine clasico": null, // No TMDb genre ID
-    "aventura epica": 12, // Adventure
-    "cine romantico juvenil": 10749, // Romance
-    "ficcion postapocaliptica": 878, // Science Fiction
-    "peliculas religiosas / fe": 18, // Drama
-    "cine historico": 36, // History
-    "comedia romantica": "35,10749", // Comedy, Romance
-    "terror psicologico": "27,53", // Horror, Thriller
-    "accion militar / belica": 10752, // War
-    "ciencia ficcion futurista": 878, // Science Fiction
-    "cine experimental / arte": 99 // Documentary
-};
-
 
 // ------------------- FUNCIONES DE GITHUB -------------------
 
@@ -346,178 +295,301 @@ setInterval(() => {
 
 }, MS_IN_24_HOURS); // Ejecutar cada 24 horas
 
+// ------------------- FUNCIÓN PARA OBTENER PELÍCULAS DE LA NUEVA API -------------------
+async function obtenerPeliculasDeNuevaAPI() {
+    try {
+        const response = await fetch('https://peliprex.fly.dev/catalog');
+        if (!response.ok) {
+            console.error(`❌ Error al obtener datos de nueva API: ${response.status}`);
+            return [];
+        }
+        const data = await response.json();
+        
+        // Transformar los datos al formato esperado
+        if (data.results && Array.isArray(data.results)) {
+            return data.results.map(item => ({
+                titulo: item.titulo || "Sin título",
+                imagen_url: item.imagen_url || "",
+                pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
+                descripcion: item.descripcion || "",
+                fecha_lanzamiento: item.fecha_lanzamiento || "",
+                duracion: item.duracion || "",
+                idioma_original: item.idioma_original || "",
+                popularidad: item.popularidad || 0,
+                puntuacion: item.puntuacion || 0,
+                generos: item.generos || "",
+                año: item.año || "",
+                id: item.id || "",
+                size: item.size || "",
+                descripcion_detallada: item.descripcion_detallada || "",
+                fuente: "nueva_api"
+            }));
+        }
+        return [];
+    } catch (error) {
+        console.error("❌ Error al obtener películas de nueva API:", error.message);
+        return [];
+    }
+}
+
+// ------------------- FUNCIÓN PARA BUSCAR EN NUEVA API -------------------
+async function buscarEnNuevaAPI(query) {
+    try {
+        const response = await fetch(`https://peliprex.fly.dev/search?q=${encodeURIComponent(query)}`);
+        if (!response.ok) {
+            console.error(`❌ Error al buscar en nueva API: ${response.status}`);
+            return [];
+        }
+        const data = await response.json();
+        
+        // Asumiendo que la API devuelve el mismo formato que /catalog
+        if (data.results && Array.isArray(data.results)) {
+            return data.results.map(item => ({
+                titulo: item.titulo || "Sin título",
+                imagen_url: item.imagen_url || "",
+                pelicula_url: cleanPeliculaUrl(item.pelicula_url || ""),
+                descripcion: item.descripcion || "",
+                fecha_lanzamiento: item.fecha_lanzamiento || "",
+                duracion: item.duracion || "",
+                idioma_original: item.idioma_original || "",
+                popularidad: item.popularidad || 0,
+                puntuacion: item.puntuacion || 0,
+                generos: item.generos || "",
+                año: item.año || "",
+                id: item.id || "",
+                size: item.size || "",
+                descripcion_detallada: item.descripcion_detallada || "",
+                fuente: "nueva_api"
+            }));
+        }
+        return [];
+    } catch (error) {
+        console.error("❌ Error al buscar en nueva API:", error.message);
+        return [];
+    }
+}
 
 // ------------------- RUTAS PRINCIPALES -------------------
 app.get("/", (req, res) => {
   res.json({
     mensaje: "🎬 API de Películas funcionando correctamente",
-    total: peliculas.length,
+    total_local: peliculas.length,
     ejemplo: "/peliculas o /peliculas/El%20Padrino"
   });
 });
 
-app.get("/peliculas", (req, res) => res.json(peliculas));
+// 🔧 MEJORADO: Obtiene películas de dos fuentes: local + nueva API
+app.get("/peliculas", async (req, res) => {
+    try {
+        // Obtener películas de ambas fuentes simultáneamente
+        const [peliculasLocales, peliculasNuevaAPI] = await Promise.all([
+            Promise.resolve(peliculas.map(p => ({ ...p, fuente: "local" }))),
+            obtenerPeliculasDeNuevaAPI()
+        ]);
+        
+        // Combinar resultados
+        let todasLasPeliculas = [...peliculasLocales, ...peliculasNuevaAPI];
+        
+        // Eliminar duplicados basados en título (simple, se puede mejorar)
+        const seen = new Set();
+        todasLasPeliculas = todasLasPeliculas.filter(item => {
+            const key = item.titulo.toLowerCase();
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+        
+        res.json(todasLasPeliculas);
+    } catch (error) {
+        console.error("❌ Error al obtener películas:", error);
+        // Fallback a solo películas locales si hay error
+        res.json(peliculas.map(p => ({ ...p, fuente: "local" })));
+    }
+});
 
+// 🔧 MEJORADO: Busca en dos fuentes: local + nueva API
 app.get("/peliculas/:titulo", async (req, res) => {
   const tituloRaw = decodeURIComponent(req.params.titulo || "");
   const titulo = tituloRaw.toLowerCase();
-  const resultado = peliculas.filter(p =>
-    (p.titulo || "").toLowerCase().includes(titulo)
-  );
-
-  if (resultado.length > 0)
-    return res.json({ fuente: "local", resultados: resultado });
-
-  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON. Buscando respaldo...`);
+  
   try {
-    // buscarPeliculaRespaldo solo trae el primer resultado y lo detalla
-    const respaldo = await buscarPeliculaRespaldo(tituloRaw);
-    if (respaldo) return res.json({ fuente: "respaldo", resultados: [respaldo] });
-    
-    // Si no hay resultados en el respaldo
-    return res.json({ 
-        fuente: "local/respaldo", 
-        total: 0, 
-        resultados: [], 
-        error: "Película no encontrada en local ni en respaldo." 
-    });
+      // Buscar en ambas fuentes simultáneamente
+      const [resultadosLocales, resultadosNuevaAPI] = await Promise.all([
+          Promise.resolve(peliculas.filter(p =>
+            (p.titulo || "").toLowerCase().includes(titulo)
+          ).map(p => ({ ...p, fuente: "local" }))),
+          buscarEnNuevaAPI(tituloRaw)
+      ]);
+      
+      // Combinar resultados
+      let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
+      
+      // Eliminar duplicados
+      const seen = new Set();
+      todosLosResultados = todosLosResultados.filter(item => {
+          const key = item.titulo.toLowerCase();
+          if (seen.has(key)) {
+              return false;
+          }
+          seen.add(key);
+          return true;
+      });
+      
+      if (todosLosResultados.length > 0) {
+          return res.json({ 
+              fuente: "multiple", 
+              total: todosLosResultados.length,
+              resultados: todosLosResultados 
+          });
+      }
+      
+      return res.json({ 
+          fuente: "multiple", 
+          total: 0, 
+          resultados: [], 
+          error: "Película no encontrada en ninguna fuente." 
+      });
+      
   } catch (error) {
-    console.error("❌ Error al buscar respaldo:", error);
-    res.status(500).json({ error: "Error al consultar respaldo externo." });
+      console.error("❌ Error al buscar película:", error);
+      // Fallback a solo búsqueda local
+      const resultadoLocal = peliculas.filter(p =>
+        (p.titulo || "").toLowerCase().includes(titulo)
+      );
+      res.json({ fuente: "local_only", resultados: resultadoLocal });
   }
 });
 
-// 🔎 Búsqueda avanzada
+// 🔎 Búsqueda avanzada (mantenida igual, pero mejorada para usar nueva API)
 app.get("/buscar", async (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
-  let resultados = peliculas;
-
-  // --- 1. BÚSQUEDA LOCAL ---
-  if (q) {
-    const ql = q.toLowerCase();
-    resultados = resultados.filter(p =>
-      (p.titulo || "").toLowerCase().includes(ql) ||
-      (p.descripcion || "").toLowerCase().includes(ql)
-    );
-  }
-
-  if (año) resultados = resultados.filter(p => String(p.año) === String(año));
-  if (genero)
-    resultados = resultados.filter(p =>
-      (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
-    );
-  if (idioma)
-    resultados = resultados.filter(
-      p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
-    );
-  if (desde && hasta)
-    resultados = resultados.filter(
-      p =>
-        parseInt(p.año) >= parseInt(desde) &&
-        parseInt(p.año) <= parseInt(hasta)
-    );
-    
-  if (resultados.length > 0) {
-    return res.json({ fuente: "local", total: resultados.length, resultados });
-  }
-
-  // --- 2. BÚSQUEDA DE RESPALDO (TMDb) ---
-  console.log("🔎 No se encontraron resultados en el JSON local. Buscando respaldo avanzado...");
-
-  const generoBuscado = String(genero || "").toLowerCase();
-  const tmdb_genre_id = TMDB_GENRE_MAP[generoBuscado] || null;
   
-  // TMDb usa YYYY-MM-DD para release dates
-  const release_date_gte = desde ? `${desde}-01-01` : null;
-  const release_date_lte = hasta ? `${hasta}-12-31` : null;
-
   try {
-    const respaldoResults = await searchTMDb({
-      query: q,
-      genre_id: tmdb_genre_id,
-      primary_release_year: año,
-      release_date_gte: release_date_gte,
-      release_date_lte: release_date_lte,
-      // Se omite el filtro de 'idioma' para TMDb ya que requiere un código ISO 639-1 específico
-    });
-
-    if (respaldoResults.length > 0) {
-        // 🔥 SOLUCIÓN APLICADA: Devolver resultados de TMDb incluso si pelicula_url es null.
-        return res.json({ fuente: "respaldo", total: respaldoResults.length, resultados: respaldoResults });
-    }
+      // 1. BÚSQUEDA LOCAL
+      let resultadosLocales = peliculas;
+      
+      if (q) {
+        const ql = q.toLowerCase();
+        resultadosLocales = resultadosLocales.filter(p =>
+          (p.titulo || "").toLowerCase().includes(ql) ||
+          (p.descripcion || "").toLowerCase().includes(ql)
+        );
+      }
+      
+      if (año) resultadosLocales = resultadosLocales.filter(p => String(p.año) === String(año));
+      if (genero)
+        resultadosLocales = resultadosLocales.filter(p =>
+          (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
+        );
+      if (idioma)
+        resultadosLocales = resultadosLocales.filter(
+          p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
+        );
+      if (desde && hasta)
+        resultadosLocales = resultadosLocales.filter(
+          p =>
+            parseInt(p.año) >= parseInt(desde) &&
+            parseInt(p.año) <= parseInt(hasta)
+        );
+      
+      resultadosLocales = resultadosLocales.map(p => ({ ...p, fuente: "local" }));
+      
+      // 2. BÚSQUEDA EN NUEVA API (si hay query)
+      let resultadosNuevaAPI = [];
+      if (q) {
+          resultadosNuevaAPI = await buscarEnNuevaAPI(q);
+      }
+      
+      // Combinar resultados
+      let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
+      
+      // Eliminar duplicados
+      const seen = new Set();
+      todosLosResultados = todosLosResultados.filter(item => {
+          const key = item.titulo.toLowerCase();
+          if (seen.has(key)) {
+              return false;
+          }
+          seen.add(key);
+          return true;
+      });
+      
+      res.json({ 
+          fuente: "multiple", 
+          total: todosLosResultados.length, 
+          resultados: todosLosResultados 
+      });
+      
   } catch (error) {
-    console.error("❌ Error al buscar respaldo avanzado:", error);
+      console.error("❌ Error en búsqueda avanzada:", error);
+      // Fallback a solo búsqueda local
+      let resultados = peliculas;
+      if (q) {
+        const ql = q.toLowerCase();
+        resultados = resultados.filter(p =>
+          (p.titulo || "").toLowerCase().includes(ql) ||
+          (p.descripcion || "").toLowerCase().includes(ql)
+        );
+      }
+      res.json({ fuente: "local_only", total: resultados.length, resultados });
   }
-
-  // Si no hay resultados en local ni en respaldo
-  res.json({ fuente: "local/respaldo", total: 0, resultados: [], error: "No se encontraron películas con los criterios de búsqueda, ni localmente ni en el respaldo." });
 });
 
-// 🆕 NUEVO ENDPOINT: Búsqueda por Categoría (Género)
+// 🆕 Búsqueda por Categoría (mejorada para usar nueva API)
 app.get("/peliculas/categoria/:genero", async (req, res) => {
     const generoRaw = decodeURIComponent(req.params.genero || "");
     const generoBuscado = generoRaw.toLowerCase();
 
-    // 1. Búsqueda Local
-    let resultados = peliculas.filter(p =>
-        (p.generos || "").toLowerCase().includes(generoBuscado)
-    );
-    
-    // Aleatorizar los resultados locales (si existen)
-    if (resultados.length > 0) {
+    try {
+        // 1. Búsqueda Local
+        let resultadosLocales = peliculas.filter(p =>
+            (p.generos || "").toLowerCase().includes(generoBuscado)
+        ).map(p => ({ ...p, fuente: "local" }));
+        
+        // 2. Obtener todas las películas de nueva API y filtrar por género
+        const peliculasNuevaAPI = await obtenerPeliculasDeNuevaAPI();
+        let resultadosNuevaAPI = peliculasNuevaAPI.filter(p =>
+            (p.generos || "").toLowerCase().includes(generoBuscado)
+        );
+        
+        // Combinar y aleatorizar
+        let todosLosResultados = [...resultadosLocales, ...resultadosNuevaAPI];
+        
+        // Eliminar duplicados
+        const seen = new Set();
+        todosLosResultados = todosLosResultados.filter(item => {
+            const key = item.titulo.toLowerCase();
+            if (seen.has(key)) {
+                return false;
+            }
+            seen.add(key);
+            return true;
+        });
+        
         return res.json({ 
-            fuente: "local", 
+            fuente: "multiple", 
+            total: todosLosResultados.length, 
+            resultados: shuffleArray(todosLosResultados) 
+        });
+        
+    } catch (error) {
+        console.error("❌ Error al buscar por categoría:", error);
+        // Fallback a solo búsqueda local
+        let resultados = peliculas.filter(p =>
+            (p.generos || "").toLowerCase().includes(generoBuscado)
+        );
+        return res.json({ 
+            fuente: "local_only", 
             total: resultados.length, 
             resultados: shuffleArray(resultados) 
         });
     }
-    
-    // 2. Búsqueda de Respaldo (TMDb) si la local falla
-    console.log(`🔎 No se encontró la categoría "${generoRaw}" en el JSON. Buscando respaldo...`);
-
-    const tmdb_genre_id = TMDB_GENRE_MAP[generoBuscado];
-    
-    if (!tmdb_genre_id) {
-        return res.json({ 
-            fuente: "respaldo", 
-            total: 0, 
-            resultados: [], 
-            error: "Categoría no válida o no mapeada para el respaldo." 
-        });
-    }
-
-    try {
-        // Usar 'vote_count.desc' para obtener películas populares de esa categoría.
-        const respaldoResults = await searchTMDb({
-            genre_id: tmdb_genre_id,
-            sort_by: 'vote_count.desc' 
-        });
-
-        // 🔥 SOLUCIÓN APLICADA: Devolver resultados de TMDb incluso si pelicula_url es null.
-        // Esto soluciona que las categorías "carguen a veces".
-        if (respaldoResults.length > 0) {
-            return res.json({ 
-                fuente: "respaldo", 
-                total: respaldoResults.length, 
-                resultados: shuffleArray(respaldoResults) 
-            });
-        }
-
-        return res.json({ 
-            fuente: "respaldo", 
-            total: 0, 
-            resultados: [], 
-            error: "No se encontraron películas en la categoría de respaldo." 
-        });
-
-    } catch (error) {
-        console.error("❌ Error al buscar categoría en respaldo:", error);
-        res.status(500).json({ error: "Error al consultar respaldo externo para la categoría." });
-    }
 });
 
 
-// ------------------- RUTAS DE USUARIOS -------------------
+// ------------------- RUTAS DE USUARIOS (sin cambios) -------------------
 app.get("/user/get", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta parámetro email" });
@@ -659,7 +731,7 @@ app.get("/user/history/remove", (req, res) => {
 });
 
 
-// ------------------- NUEVOS ENDPOINTS -------------------
+// ------------------- ENDPOINTS DE REFRESH (modificados para usar nueva API) -------------------
 
 // 🔁 Refrescar historial (uno o todos)
 app.get("/user/history/refresh", async (req, res) => {
@@ -674,11 +746,13 @@ app.get("/user/history/refresh", async (req, res) => {
 
   const refreshed = [];
   for (const h of toRefresh) {
-    // El respaldo solo es para el detalle. Aquí se mantendrá si la interfaz
-    // maneja resultados sin pelicula_url o con el anterior.
-    const nueva = await buscarPeliculaRespaldo(h.titulo); 
-    if (nueva) refreshed.push(nueva);
-    else refreshed.push(h); // Mantener el antiguo si falla la actualización
+    // Buscar en nueva API
+    const resultados = await buscarEnNuevaAPI(h.titulo);
+    if (resultados.length > 0) {
+      refreshed.push(resultados[0]); // Tomar el primer resultado
+    } else {
+      refreshed.push(h); // Mantener el antiguo si no hay resultados
+    }
   }
 
   if (!titulo) user.history = refreshed;
@@ -699,9 +773,12 @@ app.get("/user/favorites/refresh", async (req, res) => {
 
   const refreshed = [];
   for (const f of toRefresh) {
-    const nueva = await buscarPeliculaRespaldo(f.titulo);
-    if (nueva) refreshed.push(nueva);
-    else refreshed.push(f); // Mantener el antiguo si falla la actualización
+    const resultados = await buscarEnNuevaAPI(f.titulo);
+    if (resultados.length > 0) {
+      refreshed.push(resultados[0]);
+    } else {
+      refreshed.push(f); // Mantener el antiguo si falla la actualización
+    }
   }
 
   if (!titulo) user.favorites = refreshed;
@@ -763,7 +840,7 @@ app.get("/user/activity", (req, res) => {
 });
 
 
-// ------------------- NUEVOS ENDPOINTS DE SEGUIMIENTO DE STREAMING (LATIDOS) -------------------
+// ------------------- ENDPOINTS DE SEGUIMIENTO DE STREAMING (LATIDOS) -------------------
 
 /**
  * 🆕 Sistema de seguimiento de latidos (heartbeat) para el progreso de streaming.
@@ -887,141 +964,6 @@ app.get("/user/consume_credit", (req, res) => {
         message: "Crédito consumido exitosamente. La película se marcó como vista completa." 
     });
 });
-
-// ------------------- RESPALDO TMDb + YouTube (BUSQUEDA DE UNA SOLA PELICULA) -------------------
-// NOTA: Esta función se usa para un solo resultado detallado (Ej. /peliculas/Titulo).
-async function buscarPeliculaRespaldo(titulo) {
-  if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
-      console.error("❌ No se puede usar el respaldo: Faltan claves de API.");
-      return null;
-  }
-  
-  try {
-    const url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(titulo)}`;
-    const resp = await fetch(url);
-    const data = await resp.json();
-    if (!data.results || data.results.length === 0) return null;
-
-    const pelicula = data.results[0];
-    const detallesUrl = `https://api.themoviedb.org/3/movie/${pelicula.id}?api_key=${TMDB_API_KEY}&language=es-ES`;
-    const detallesResp = await fetch(detallesUrl);
-    const detalles = await detallesResp.json();
-
-    // 🎯 Lógica para buscar la película completa en YouTube
-    // Se mejoran los términos de búsqueda para ser más amplios, si el primero falla.
-    
-    // Intento 1: "película completa español latino"
-    let youtubeQuery = `${pelicula.title} película completa español latino`; 
-    let youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
-    let youtubeData = await youtubeResp.json();
-    let youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-
-    // Intento 2: Si el primero falla, probar solo "película completa"
-    if (!youtubeId) {
-        youtubeQuery = `${pelicula.title} película completa`;
-        youtubeResp = await fetch(`https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`);
-        youtubeData = await youtubeResp.json();
-        youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-    }
-    // Fin de la mejora en la búsqueda de YouTube.
-
-    return {
-      titulo: pelicula.title,
-      descripcion: pelicula.overview || "",
-      fecha_lanzamiento: pelicula.release_date || "",
-      idioma_original: pelicula.original_language || "",
-      puntuacion: pelicula.vote_average || 0,
-      popularidad: pelicula.popularity || 0,
-      generos: detalles.genres?.map(g => g.name).join(", ") || "",
-      imagen_url: pelicula.poster_path
-        ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
-        : "",
-      // Si se encuentra en YouTube, se usa su URL, si no, es null.
-      pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null, 
-      respaldo: true
-    };
-  } catch (err) {
-    console.error("❌ Error TMDb o YouTube:", err.message);
-    return null;
-  }
-}
-
-// 🆕 NUEVA FUNCIÓN: Búsqueda general en TMDb (para listas/avanzada/categorías)
-async function searchTMDb(params) {
-    if (!TMDB_API_KEY || !YOUTUBE_API_KEY) {
-        return [];
-    }
-    
-    const { query, genre_id, primary_release_year, release_date_gte, release_date_lte, sort_by = 'popularity.desc', page = 1 } = params;
-    
-    let url = '';
-    
-    if (query) {
-        // Búsqueda por query (nombre o descripción)
-        url = `https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&language=es-ES&query=${encodeURIComponent(query)}&page=${page}`;
-    } else if (genre_id || primary_release_year || release_date_gte || release_date_lte) {
-        // Búsqueda avanzada/Discover (para género, año, rango de fechas)
-        let discoverParams = `&sort_by=${sort_by}&page=${page}`;
-        if (genre_id) discoverParams += `&with_genres=${genre_id}`;
-        if (primary_release_year) discoverParams += `&primary_release_year=${primary_release_year}`;
-        if (release_date_gte) discoverParams += `&primary_release_date.gte=${release_date_gte}`;
-        if (release_date_lte) discoverParams += `&primary_release_date.lte=${release_date_lte}`;
-
-        url = `https://api.themoviedb.org/3/discover/movie?api_key=${TMDB_API_KEY}&language=es-ES${discoverParams}`;
-    } else {
-        return []; // No hay criterio de búsqueda válido
-    }
-
-    try {
-        const resp = await fetch(url);
-        const data = await resp.json();
-        
-        if (!data.results || data.results.length === 0) return [];
-
-        // Ahora procesaremos todos los resultados de TMDb (hasta 10)
-        const resultsToEnrich = data.results.slice(0, 10); 
-        const enrichedResults = [];
-
-        for (const pelicula of resultsToEnrich) {
-            if (!pelicula.title) continue; 
-            
-            // Lógica para buscar YouTube (se mantiene, pero el resultado de TMDb se devuelve siempre)
-            const year = pelicula.release_date ? pelicula.release_date.substring(0, 4) : '';
-            const youtubeQuery = `${pelicula.title} ${year} película completa español latino`; // Usamos la misma query optimizada
-            const youtubeUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&q=${encodeURIComponent(youtubeQuery)}&key=${YOUTUBE_API_KEY}&type=video&maxResults=1`;
-            
-            // Ejecutar la búsqueda de YouTube SIN esperar
-            const youtubeResp = await fetch(youtubeUrl);
-            const youtubeData = await youtubeResp.json();
-            const youtubeId = youtubeData.items?.[0]?.id?.videoId || null;
-            
-            // Reutilizar la estructura de datos del local
-            enrichedResults.push({
-                titulo: pelicula.title,
-                descripcion: pelicula.overview || "",
-                fecha_lanzamiento: pelicula.release_date || "",
-                idioma_original: pelicula.original_language || "",
-                puntuacion: pelicula.vote_average || 0,
-                generos_ids: pelicula.genre_ids || [], 
-                imagen_url: pelicula.poster_path
-                    ? `https://image.tmdb.org/t/p/w500${pelicula.poster_path}`
-                    : "",
-                // 🔥 PUNTO CLAVE: El enlace de YouTube es opcional (puede ser null).
-                pelicula_url: youtubeId ? `https://www.youtube.com/watch?v=${youtubeId}` : null,
-                respaldo: true
-            });
-        }
-
-        // 🔥 MODIFICACIÓN: Devolver TODOS los resultados enriquecidos de TMDb. 
-        // Si no se encontró el enlace de YouTube, se devuelve la película con pelicula_url: null.
-        return enrichedResults; 
-
-    } catch (err) {
-        console.error("❌ Error en searchTMDb:", err.message);
-        return [];
-    }
-}
-
 
 // ------------------- INICIAR SERVIDOR -------------------
 async function startServer() {

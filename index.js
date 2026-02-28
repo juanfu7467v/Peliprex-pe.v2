@@ -3,179 +3,182 @@ import cors from "cors";
 import fs from "fs";
 import fetch from "node-fetch";
 import path from "path";
-import { Worker, isMainThread, parentPort, workerData } from "worker_threads";
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // ← necesario para leer body en POST
 
-// ===================================================================
-// ⚙️  CONFIGURACIÓN GENERAL
-// ===================================================================
-const GITHUB_TOKEN          = process.env.GITHUB_TOKEN;
-const GITHUB_REPO           = process.env.GITHUB_REPO;
-const BACKUP_FILE_NAME      = "users_data.json";
-const PELIS_FILE            = path.join(process.cwd(), "peliculas.json");
-const USERS_FILE            = path.join(process.cwd(), BACKUP_FILE_NAME);
-const MS_IN_24_HOURS        = 24 * 60 * 60 * 1000;
-const IS_COMPLETE_THRESHOLD = 90;   // % para considerar vista completa
-const MAX_HISTORY           = 200;  // máx registros de historial
-const MAX_SEARCHES          = 100;  // máx búsquedas guardadas
+// ------------------- GITHUB CONFIGURACIÓN DE RESPALDO -------------------
+// ¡ASEGÚRATE de configurar las variables de entorno GITHUB_TOKEN y GITHUB_REPO!
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO; // Formato: 'usuario/nombre-del-repositorio'
+const BACKUP_FILE_NAME = "users_data.json";
 
-// ─── Variables de entorno Firestore (disponibles pero no se instancia SDK) ───
-// Las variables FIREBASE_* están en process.env y se exportan vía /api/firebase-config
-// El SDK de Firebase se usa sólo en el cliente (HTML); aquí sólo las exponemos.
+// 📂 Archivos locales (Mantenidos)
+const PELIS_FILE = path.join(process.cwd(), "peliculas.json");
+const USERS_FILE = path.join(process.cwd(), BACKUP_FILE_NAME);
 
-// ===================================================================
-// 🔑  SISTEMA DE API KEYS (identidad de usuario)
-// ===================================================================
-/**
- * Cada API Key mapea a un email de usuario.
- * Se almacena dentro del propio users_data.json para persistencia.
- *   users_data.json → { users: {...}, apiKeys: { "KEY": "email" } }
- */
-function readApiKeys() {
-  const data = readUsersData();
-  return data.apiKeys || {};
-}
-function resolveEmailFromApiKey(apiKey) {
-  if (!apiKey) return null;
-  const keys = readApiKeys();
-  return keys[apiKey] || null;
-}
+// ------------------- FUNCIONES AUXILIARES -------------------
 
-// ===================================================================
-// 🛡️  MIDDLEWARE DE AUTENTICACIÓN
-// ===================================================================
-/**
- * Valida x-api-key en el header.
- * Añade req.userEmail y req.apiKey a la request.
- * Si no es válida → 401.
- */
-function authMiddleware(req, res, next) {
-  const apiKey = req.headers["x-api-key"] || req.body?.apiKey || null;
-  if (!apiKey) {
-    return res.status(401).json({ error: "No autorizado. Incluye x-api-key en el header." });
-  }
-  const email = resolveEmailFromApiKey(apiKey);
-  if (!email) {
-    return res.status(403).json({ error: "API Key inválida o no registrada." });
-  }
-  req.userEmail = email;
-  req.apiKey    = apiKey;
-  next();
-}
-
-// ===================================================================
-// 🧵  PROCESAMIENTO EN SEGUNDO PLANO (cola asíncrona)
-// ===================================================================
-const backgroundQueue = [];
-let processingQueue = false;
-
-async function processQueue() {
-  if (processingQueue || backgroundQueue.length === 0) return;
-  processingQueue = true;
-  while (backgroundQueue.length > 0) {
-    const task = backgroundQueue.shift();
-    try { await task(); } catch (e) { console.error("❌ Error en tarea background:", e.message); }
-  }
-  processingQueue = false;
-}
-
-function enqueueBackground(fn) {
-  backgroundQueue.push(fn);
-  setImmediate(processQueue); // no bloquea
-}
-
-// ===================================================================
-// 🔧  UTILIDADES
-// ===================================================================
+/** Limpia la URL de la película eliminando la duplicidad '/prepreview' para corregir a '/preview'. */
 function cleanPeliculaUrl(url) {
   if (!url) return url;
-  return url.replace(/\/prepreview([?#]|$)/, "/preview$1");
+  // Reemplaza '/prepreview' con '/preview' para corregir el error en la URL de Google Drive (o similar).
+  // El $1 asegura que se mantenga cualquier parámetro de consulta (?...) o hash (#...).
+  return url.replace(/\/prepreview([?#]|$)/, '/preview$1');
 }
 
+/** Devuelve un array con elementos aleatorios y desordenados. */
 function shuffleArray(array) {
-  for (let i = array.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
-  }
-  return array;
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+    return array;
 }
 
-// ===================================================================
-// 📂  GITHUB BACKUP
-// ===================================================================
+// ------------------- FUNCIONES DE GITHUB -------------------
+
+/** Obtiene el SHA de la última versión del archivo en GitHub, necesario para actualizar. */
 async function getFileSha(filePath) {
   if (!GITHUB_TOKEN || !GITHUB_REPO) return null;
   const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
   try {
     const resp = await fetch(url, {
-      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3+json" },
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
     });
     if (resp.status === 404) return null;
-    if (!resp.ok) return null;
+    if (!resp.ok) {
+      console.error(`❌ Error al obtener SHA de GitHub (Status ${resp.status}): ${await resp.text()}`);
+      return null;
+    }
+
     const data = await resp.json();
     return data.sha;
-  } catch { return null; }
-}
-
-async function saveUsersDataToGitHub(content) {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
-  try {
-    const sha = await getFileSha(BACKUP_FILE_NAME);
-    const contentBase64 = Buffer.from(content).toString("base64");
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
-    const body = { message: `Backup ${new Date().toISOString()}`, content: contentBase64 };
-    if (sha) body.sha = sha;
-    const resp = await fetch(url, {
-      method: "PUT",
-      headers: { Authorization: `token ${GITHUB_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    return resp.ok;
-  } catch { return false; }
-}
-
-async function loadUsersDataFromGitHub() {
-  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
-  try {
-    const resp = await fetch(url, {
-      headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: "application/vnd.github.v3.raw" },
-    });
-    if (resp.status === 404) return false;
-    if (!resp.ok) return false;
-    const content = await resp.text();
-    fs.writeFileSync(USERS_FILE, content, "utf8");
-    console.log("✅ Datos restaurados desde GitHub.");
-    return true;
-  } catch { return false; }
-}
-
-// ===================================================================
-// 📦  GESTIÓN DE USUARIOS (local + GitHub)
-// ===================================================================
-function ensureUsersFile() {
-  if (!fs.existsSync(USERS_FILE)) {
-    const initialData = JSON.stringify({ users: {}, apiKeys: {} }, null, 2);
-    fs.writeFileSync(USERS_FILE, initialData);
-    enqueueBackground(() => saveUsersDataToGitHub(initialData));
+  } catch (error) {
+    console.error("❌ Excepción al obtener SHA de GitHub:", error.message);
+    return null;
   }
 }
 
+/** Guarda los datos de usuario en GitHub. */
+async function saveUsersDataToGitHub(content) {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) {
+    console.log("⚠️ GitHub no configurado (Faltan GITHUB_TOKEN o GITHUB_REPO). Solo guardado local.");
+    return false;
+  }
+
+  console.log(`💾 Iniciando respaldo de ${BACKUP_FILE_NAME} en GitHub...`);
+  try {
+    const sha = await getFileSha(BACKUP_FILE_NAME);
+    // Codificar el contenido en base64 para la API de GitHub
+    const contentBase64 = Buffer.from(content).toString('base64'); 
+    const commitMessage = `Automated backup: Update ${BACKUP_FILE_NAME} at ${new Date().toISOString()}`;
+
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
+
+    // Construir el cuerpo de la petición. Solo se envía el sha si existe.
+    const requestBody = {
+      message: commitMessage,
+      content: contentBase64
+    };
+    if (sha) {
+      requestBody.sha = sha;
+    }
+
+    const resp = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!resp.ok) {
+      console.error(`❌ Error al guardar en GitHub (Status: ${resp.status}): ${await resp.text()}`);
+      return false;
+    }
+
+    console.log("✅ Datos de usuario respaldados en GitHub con éxito.");
+    return true;
+
+  } catch (error) {
+    console.error("❌ Excepción al guardar en GitHub:", error.message);
+    return false;
+  }
+}
+
+/** Carga los datos de usuario desde GitHub al iniciar el servidor. */
+async function loadUsersDataFromGitHub() {
+  if (!GITHUB_TOKEN || !GITHUB_REPO) return false;
+  
+  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${BACKUP_FILE_NAME}`;
+  console.log(`📡 Intentando cargar ${BACKUP_FILE_NAME} desde GitHub...`);
+
+  try {
+    const resp = await fetch(url, {
+      headers: {
+        'Authorization': `token ${GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github.v3.raw', // Obtener el contenido crudo (raw)
+      },
+    });
+
+    if (resp.status === 404) {
+      console.log(`ℹ️ Archivo no encontrado en GitHub. Se creará un nuevo archivo local si es necesario.`);
+      return false;
+    }
+    
+    if (!resp.ok) {
+      console.error(`❌ Error al cargar de GitHub (Status: ${resp.status}): ${await resp.text()}`);
+      return false;
+    }
+
+    const content = await resp.text();
+    fs.writeFileSync(USERS_FILE, content, 'utf8');
+    console.log(`✅ Datos de usuario cargados y restaurados localmente desde GitHub.`);
+    return true;
+
+  } catch (error) {
+    console.error("❌ Excepción al cargar de GitHub:", error.message);
+    return false;
+  }
+}
+
+
+// ------------------- CARGAR PELÍCULAS -------------------
+let peliculas = [];
+try {
+  peliculas = JSON.parse(fs.readFileSync(PELIS_FILE, "utf8"));
+  console.log(`✅ Cargadas ${peliculas.length} películas desde peliculas.json`);
+} catch (err) {
+  console.error("❌ Error cargando peliculas.json:", err.message);
+  peliculas = [];
+}
+
+// ------------------- FUNCIONES DE USUARIOS -------------------
+function ensureUsersFile() {
+  if (!fs.existsSync(USERS_FILE)) {
+    console.log(`ℹ️ Creando archivo local: ${BACKUP_FILE_NAME}`);
+    const initialData = JSON.stringify({ users: {} }, null, 2);
+    fs.writeFileSync(USERS_FILE, initialData);
+    // Respaldo inicial a GitHub al crear el archivo
+    saveUsersDataToGitHub(initialData); 
+  }
+}
 function readUsersData() {
   ensureUsersFile();
   return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
 }
-
 function writeUsersData(data) {
   const content = JSON.stringify(data, null, 2);
   fs.writeFileSync(USERS_FILE, content);
-  // Backup en segundo plano
-  enqueueBackground(() => saveUsersDataToGitHub(content));
+  
+  // Realizar el respaldo a GitHub de forma asíncrona
+  saveUsersDataToGitHub(content); 
 }
-
 function getOrCreateUser(email) {
   if (!email) return null;
   const data = readUsersData();
@@ -186,426 +189,406 @@ function getOrCreateUser(email) {
       credits: 0,
       favorites: [],
       history: [],
-      searches: [],
       resume: {},
-      preferences: { genres: [], languages: [] },
-      lastActivityTimestamp: new Date().toISOString(),
+      // 🆕 Campo para la limpieza de actividad
+      lastActivityTimestamp: new Date().toISOString() 
     };
     writeUsersData(data);
   }
-  const u = data.users[email];
-  // Migrar campos faltantes en usuarios antiguos
-  if (!u.resume)       u.resume = {};
-  if (!u.searches)     u.searches = [];
-  if (!u.preferences)  u.preferences = { genres: [], languages: [] };
-  if (!u.lastActivityTimestamp) u.lastActivityTimestamp = new Date().toISOString();
-  return u;
+  
+  // Asegurar que el campo resume y lastActivityTimestamp existen en usuarios antiguos
+  if (!data.users[email].resume) data.users[email].resume = {};
+  if (!data.users[email].lastActivityTimestamp) data.users[email].lastActivityTimestamp = new Date().toISOString();
+  
+  return data.users[email];
 }
-
 function saveUser(email, userObj) {
   const data = readUsersData();
   data.users[email] = userObj;
   writeUsersData(data);
 }
 
-// ===================================================================
-// 🧠  MOTOR DE RECOMENDACIONES
-// ===================================================================
-/**
- * Calcula géneros y keywords preferidas a partir del historial y búsquedas.
- * Devuelve un objeto { topGenres, topKeywords }
- */
-function analyzePreferences(user, allMovies) {
-  const genreCount = {};
-  const keywordCount = {};
-
-  // Ponderar historial (peso 3)
-  for (const h of user.history) {
-    const movie = allMovies.find(m => m.pelicula_url === h.pelicula_url || m.titulo === h.titulo);
-    if (movie && movie.generos) {
-      const genres = movie.generos.toLowerCase().split(/[,|\/]/).map(g => g.trim());
-      genres.forEach(g => { if (g) genreCount[g] = (genreCount[g] || 0) + 3; });
-    }
-  }
-
-  // Ponderar favoritos (peso 5)
-  for (const f of user.favorites) {
-    const movie = allMovies.find(m => m.pelicula_url === f.pelicula_url || m.titulo === f.titulo);
-    if (movie && movie.generos) {
-      const genres = movie.generos.toLowerCase().split(/[,|\/]/).map(g => g.trim());
-      genres.forEach(g => { if (g) genreCount[g] = (genreCount[g] || 0) + 5; });
-    }
-  }
-
-  // Ponderar búsquedas (peso 1)
-  for (const s of user.searches) {
-    const q = (s.query || "").toLowerCase().split(" ");
-    q.forEach(kw => { if (kw.length > 2) keywordCount[kw] = (keywordCount[kw] || 0) + 1; });
-  }
-
-  // Actualizar preferencias en el usuario
-  const topGenres = Object.entries(genreCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5)
-    .map(e => e[0]);
-  const topKeywords = Object.entries(keywordCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(e => e[0]);
-
-  return { topGenres, topKeywords, genreCount };
-}
-
-/**
- * Genera recomendaciones personalizadas para un usuario.
- */
-function generateRecommendations(user, allMovies, limit = 30) {
-  if (!allMovies || allMovies.length === 0) return [];
-
-  const watchedUrls = new Set([
-    ...user.history.map(h => h.pelicula_url),
-    ...user.favorites.map(f => f.pelicula_url),
-  ]);
-
-  const { topGenres, topKeywords, genreCount } = analyzePreferences(user, allMovies);
-
-  // Score a cada película
-  const scored = allMovies
-    .filter(m => !watchedUrls.has(m.pelicula_url)) // no vistas aún
-    .map(movie => {
-      let score = 0;
-      const movieGenres = (movie.generos || "").toLowerCase().split(/[,|\/]/).map(g => g.trim());
-      const movieTitle  = (movie.titulo || "").toLowerCase();
-      const movieDesc   = (movie.descripcion || "").toLowerCase();
-
-      // Coincidencia de géneros
-      movieGenres.forEach(g => {
-        if (genreCount[g]) score += genreCount[g];
-      });
-
-      // Coincidencia de keywords
-      topKeywords.forEach(kw => {
-        if (movieTitle.includes(kw) || movieDesc.includes(kw)) score += 2;
-      });
-
-      // Pequeño factor aleatorio para variedad
-      score += Math.random() * 0.5;
-
-      return { movie, score };
-    })
-    .sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, limit).map(s => s.movie);
-}
-
-/**
- * Películas similares a una dada (por géneros y descripción).
- */
-function getSimilarMovies(targetMovie, allMovies, limit = 20) {
-  if (!targetMovie) return [];
-  const targetGenres = new Set(
-    (targetMovie.generos || "").toLowerCase().split(/[,|\/]/).map(g => g.trim()).filter(Boolean)
-  );
-  const targetWords = new Set(
-    (targetMovie.descripcion || "").toLowerCase().split(/\W+/).filter(w => w.length > 3)
-  );
-
-  return allMovies
-    .filter(m => m.pelicula_url !== targetMovie.pelicula_url)
-    .map(movie => {
-      let score = 0;
-      const movieGenres = (movie.generos || "").toLowerCase().split(/[,|\/]/).map(g => g.trim());
-      movieGenres.forEach(g => { if (targetGenres.has(g)) score += 3; });
-
-      const movieWords = (movie.descripcion || "").toLowerCase().split(/\W+/);
-      movieWords.forEach(w => { if (targetWords.has(w)) score += 0.5; });
-
-      return { movie, score };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
-    .map(s => s.movie);
-}
-
-/**
- * Tendencias: películas más vistas globalmente (basado en historial de todos).
- */
-function getTrendingMovies(allUsers, allMovies, limit = 30) {
-  const viewCount = {};
-  for (const email in allUsers) {
-    const user = allUsers[email];
-    (user.history || []).forEach(h => {
-      viewCount[h.pelicula_url] = (viewCount[h.pelicula_url] || 0) + 1;
-    });
-  }
-  return allMovies
-    .map(m => ({ movie: m, views: viewCount[m.pelicula_url] || 0 }))
-    .sort((a, b) => b.views - a.views || Math.random() - 0.5)
-    .slice(0, limit)
-    .map(s => s.movie);
-}
-
-// ===================================================================
-// 🎬  CARGA DE PELÍCULAS
-// ===================================================================
-let peliculas = [];
-try {
-  peliculas = JSON.parse(fs.readFileSync(PELIS_FILE, "utf8"));
-  console.log(`✅ Cargadas ${peliculas.length} películas locales.`);
-} catch (err) {
-  console.error("❌ Error cargando peliculas.json:", err.message);
-}
-
-// ===================================================================
-// 🌐  FUENTE EXTERNA (peliprex.fly.dev)
-// ===================================================================
-async function fetchExternalPeliculas() {
-  try {
-    const resp = await fetch("https://peliprex.fly.dev/catalog");
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return Array.isArray(data) ? data : [];
-  } catch { return []; }
-}
-
-async function fetchExternalSearch(params = {}) {
-  try {
-    const url = new URL("https://peliprex.fly.dev/search");
-    if (params.q)        url.searchParams.append("q",        params.q);
-    if (params.genre)    url.searchParams.append("genre",    params.genre);
-    if (params.year)     url.searchParams.append("year",     params.year);
-    if (params.desde)    url.searchParams.append("desde",    params.desde);
-    if (params.hasta)    url.searchParams.append("hasta",    params.hasta);
-    if (params.language) url.searchParams.append("language", params.language);
-    const resp = await fetch(url.toString());
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    return Array.isArray(data) ? data : [];
-  } catch { return []; }
-}
-
-function combinarResultados(externos, locales) {
-  const urlsExternas = new Set(externos.map(p => p.pelicula_url));
-  const localesUnicos = locales.filter(p => !urlsExternas.has(p.pelicula_url));
-  return [...externos, ...localesUnicos];
-}
-
-// ===================================================================
-// ⏱️  CONTROL DE INACTIVIDAD + TAREA LIMPIEZA 24H
-// ===================================================================
+// ------------------- CONTROL DE INACTIVIDAD DEL SERVIDOR -------------------
 let ultimaPeticion = Date.now();
+const TIEMPO_INACTIVIDAD = 60 * 1000;
+
+setInterval(async () => {
+  if (Date.now() - ultimaPeticion >= TIEMPO_INACTIVIDAD) {
+    console.log("🕒 Sin tráfico por 1 minuto. Iniciando cierre y respaldo final...");
+    
+    try {
+      // 1. Leer el estado final desde el archivo local
+      const data = readUsersData();
+      const content = JSON.stringify(data, null, 2);
+      
+      // 2. Realizar el respaldo final a GitHub y ESPERAR su finalización
+      const saved = await saveUsersDataToGitHub(content);
+      
+      console.log(`✅ Respaldo final ${saved ? 'exitoso' : 'fallido'}. Cerrando servidor.`);
+    } catch (e) {
+      console.error("❌ Error durante el cierre y respaldo final:", e.message);
+    }
+    
+    // 3. Detener el proceso
+    process.exit(0);
+  }
+}, 30 * 1000);
 
 app.use((req, res, next) => {
   ultimaPeticion = Date.now();
   next();
 });
 
-setInterval(async () => {
-  if (Date.now() - ultimaPeticion >= 60_000) {
-    console.log("🕒 Sin tráfico. Guardando y cerrando...");
-    const data = readUsersData();
-    await saveUsersDataToGitHub(JSON.stringify(data, null, 2));
-    process.exit(0);
-  }
-}, 30_000);
+
+// ------------------- TAREA PROGRAMADA: ELIMINACIÓN DE ACTIVIDAD CADA 24 HRS -------------------
+/** * Tarea programada para limpiar historial y resumen de películas 
+ * que tienen más de 24 horas de la última actividad/latido.
+ */
+const MS_IN_24_HOURS = 24 * 60 * 60 * 1000;
 
 setInterval(() => {
-  const data = readUsersData();
-  let modified = false;
-  const now = Date.now();
-  for (const email in data.users) {
-    const user = data.users[email];
-    const prevH = user.history.length;
-    user.history = user.history.filter(h => now - new Date(h.fecha).getTime() < MS_IN_24_HOURS);
-    const newResume = {};
-    for (const url in user.resume) {
-      if (now - new Date(user.resume[url].lastHeartbeat).getTime() < MS_IN_24_HOURS)
-        newResume[url] = user.resume[url];
+    console.log("🧹 Iniciando chequeo de limpieza de actividad de 24 horas...");
+    const data = readUsersData();
+    let usersModified = false;
+    const now = Date.now();
+
+    for (const email in data.users) {
+        const user = data.users[email];
+        let userActivityModified = false;
+
+        // --- Limpieza de Historial ---
+        const historyLengthBefore = user.history.length;
+        user.history = user.history.filter(h => {
+            const historyDate = new Date(h.fecha).getTime();
+            // Mantener solo lo que fue agregado en las últimas 24 horas
+            return now - historyDate < MS_IN_24_HOURS;
+        });
+        if (user.history.length !== historyLengthBefore) {
+            console.log(`   [${email}] Historial: Eliminados ${historyLengthBefore - user.history.length} elementos por antigüedad (>24h).`);
+            userActivityModified = true;
+        }
+
+        // --- Limpieza de Resumen de Reproducción ---
+        const resumeKeysBefore = Object.keys(user.resume).length;
+        const newResume = {};
+        for (const url in user.resume) {
+            const resumeEntry = user.resume[url];
+            const lastHeartbeatDate = new Date(resumeEntry.lastHeartbeat).getTime();
+            // Mantener solo lo que tuvo un latido en las últimas 24 horas
+            if (now - lastHeartbeatDate < MS_IN_24_HOURS) {
+                newResume[url] = resumeEntry;
+            }
+        }
+        user.resume = newResume;
+        const resumeKeysAfter = Object.keys(user.resume).length;
+        
+        if (resumeKeysAfter !== resumeKeysBefore) {
+            console.log(`   [${email}] Resumen: Eliminados ${resumeKeysBefore - resumeKeysAfter} elementos por inactividad (>24h).`);
+            userActivityModified = true;
+        }
+
+        if (userActivityModified) {
+            usersModified = true;
+        }
     }
-    user.resume = newResume;
-    if (user.history.length !== prevH || Object.keys(newResume).length !== Object.keys(user.resume).length)
-      modified = true;
+
+    if (usersModified) {
+        writeUsersData(data);
+        console.log("✅ Limpieza de actividad completada y datos guardados.");
+    } else {
+        console.log("ℹ️ No se encontraron actividades para limpiar.");
+    }
+
+}, MS_IN_24_HOURS); // Ejecutar cada 24 horas
+
+// ------------------- FUNCIÓN PARA CONSULTAR API EXTERNA EN PARALELO -------------------
+async function fetchExternalPeliculas() {
+  try {
+    const response = await fetch('https://peliprex.fly.dev/catalog');
+    if (!response.ok) {
+      console.log(`⚠️ API externa respondió con status ${response.status}`);
+      return [];
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.log("⚠️ Error al consultar API externa /catalog:", error.message);
+    return [];
   }
-  if (modified) writeUsersData(data);
-}, MS_IN_24_HOURS);
+}
 
-// ===================================================================
-// 🏠  RUTAS PÚBLICAS (sin autenticación)
-// ===================================================================
+async function fetchExternalSearch(params = {}) {
+  try {
+    const url = new URL('https://peliprex.fly.dev/search');
+    
+    // Agregar todos los parámetros de búsqueda
+    if (params.q) url.searchParams.append('q', params.q);
+    if (params.genre) url.searchParams.append('genre', params.genre);
+    if (params.year) url.searchParams.append('year', params.year);
+    if (params.desde) url.searchParams.append('desde', params.desde);
+    if (params.hasta) url.searchParams.append('hasta', params.hasta);
+    if (params.language) url.searchParams.append('language', params.language);
+    
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      console.log(`⚠️ API externa search respondió con status ${response.status}`);
+      return [];
+    }
+    const data = await response.json();
+    return Array.isArray(data) ? data : [];
+  } catch (error) {
+    console.log("⚠️ Error al consultar API externa /search:", error.message);
+    return [];
+  }
+}
 
-// Raíz informativa
+function combinarResultados(externos, locales) {
+  // Crear un Set con las URLs de los resultados externos para evitar duplicados
+  const urlsExternas = new Set(externos.map(p => p.pelicula_url));
+  
+  // Filtrar locales que no estén ya en externos
+  const localesUnicos = locales.filter(p => !urlsExternas.has(p.pelicula_url));
+  
+  // Dar prioridad a externos, luego complementar con locales únicos
+  return [...externos, ...localesUnicos];
+}
+
+// ------------------- RUTAS PRINCIPALES -------------------
 app.get("/", (req, res) => {
   res.json({
-    mensaje: "🎬 PeliPREX API v2 - Sistema inteligente de películas",
-    version: "2.0",
-    auth: "Se requiere x-api-key en el header para endpoints de usuario y recomendaciones",
-    endpoints_publicos: ["/peliculas", "/peliculas/:titulo", "/buscar", "/peliculas/categoria/:genero", "/api/config", "/api/analyze", "/api/firebase-config"],
-    endpoints_privados: ["/user/*", "/recommendations", "/history", "/favorites", "/continue_watching", "/trending", "/similar", "/user/preferences"],
-    nota: "Los endpoints privados requieren POST + header x-api-key"
+    mensaje: "🎬 API de Películas funcionando correctamente",
+    total: peliculas.length,
+    ejemplo: "/peliculas o /peliculas/El%20Padrino"
   });
 });
 
-// ── Configuración del frontend ──────────────────────────────────────
-app.get("/api/config", (req, res) => {
-  res.json({
-    peliprexBaseUrl: process.env.PELIPREX_BASE_URL || "",
-    geminiApiKey:    process.env.GEMINI_API_KEY    || "",
-  });
-});
-
-// ── Configuración Firebase (para el cliente) ──────────────────────
-app.get("/api/firebase-config", (req, res) => {
-  res.json({
-    apiKey:            process.env.FIREBASE_API_KEY             || "",
-    authDomain:        process.env.FIREBASE_AUTH_DOMAIN         || "",
-    projectId:         process.env.FIREBASE_PROJECT_ID         || "",
-    storageBucket:     process.env.FIREBASE_STORAGE_BUCKET      || "",
-    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "",
-    appId:             process.env.FIREBASE_APP_ID              || "",
-  });
-});
-
-// ── Análisis con Gemini (proxy) ────────────────────────────────────
-app.post("/api/analyze", async (req, res) => {
-  const { movieTitle, movieDescription } = req.body;
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-  if (!GEMINI_API_KEY) return res.status(500).json({ error: "GEMINI_API_KEY no configurada." });
-  try {
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const prompt = `Eres un crítico de cine experto. Analiza la siguiente película y proporciona un análisis detallado.
-Título: ${movieTitle}
-Descripción: ${movieDescription}
-Por favor incluye: Sinopsis, Trama, Aspectos Destacados, Dirección, Música, Actuaciones y Veredicto.`;
-    const response = await fetch(geminiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
-    const data = await response.json();
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// ===================================================================
-// 🎬  CATÁLOGO (GET – compatibilidad con frontend existente)
-// ===================================================================
+// 🔧 1. MEJORA EN CARGA DE PELÍCULAS (dos fuentes en paralelo)
 app.get("/peliculas", async (req, res) => {
   try {
-    const [externas, locales] = await Promise.all([fetchExternalPeliculas(), Promise.resolve(peliculas)]);
-    res.json(combinarResultados(externas, locales));
-  } catch { res.json(peliculas); }
-});
-
-app.get("/peliculas/:titulo", (req, res) => {
-  const titulo = decodeURIComponent(req.params.titulo || "").toLowerCase();
-  const resultados = peliculas.filter(p => (p.titulo || "").toLowerCase().includes(titulo));
-  if (resultados.length > 0) return res.json({ fuente: "local", resultados });
-  return res.json({ fuente: "local", total: 0, resultados: [], error: "No encontrada." });
-});
-
-app.get("/peliculas/categoria/:genero", async (req, res) => {
-  const generoRaw = decodeURIComponent(req.params.genero || "");
-  const generoBuscado = generoRaw.toLowerCase();
-  try {
-    const [externos, locales] = await Promise.all([
-      fetchExternalSearch({ genre: generoBuscado }),
-      Promise.resolve(peliculas.filter(p => (p.generos || "").toLowerCase().includes(generoBuscado))),
+    // Consultar ambas fuentes en paralelo
+    const [externas, locales] = await Promise.all([
+      fetchExternalPeliculas(),
+      Promise.resolve(peliculas) // locales ya están cargadas
     ]);
-    if (externos.length > 0) {
-      const combinados = combinarResultados(externos, locales);
-      return res.json({ fuente: "combinada", total: combinados.length, resultados: shuffleArray(combinados) });
-    }
-    if (locales.length > 0)
-      return res.json({ fuente: "local", total: locales.length, resultados: shuffleArray(locales) });
-    return res.json({ fuente: "local", total: 0, resultados: [], error: "Categoría no encontrada." });
-  } catch {
-    const locales = peliculas.filter(p => (p.generos || "").toLowerCase().includes(generoBuscado));
-    return res.json({ fuente: "local", total: locales.length, resultados: shuffleArray(locales) });
+    
+    // Combinar resultados dando prioridad a externas
+    const resultadosCombinados = combinarResultados(externas, locales);
+    
+    res.json(resultadosCombinados);
+  } catch (error) {
+    console.error("❌ Error en /peliculas:", error.message);
+    // Fallback a locales si algo falla
+    res.json(peliculas);
   }
 });
 
+app.get("/peliculas/:titulo", async (req, res) => {
+  const tituloRaw = decodeURIComponent(req.params.titulo || "");
+  const titulo = tituloRaw.toLowerCase();
+  
+  // Búsqueda local
+  const resultadoLocal = peliculas.filter(p =>
+    (p.titulo || "").toLowerCase().includes(titulo)
+  );
+
+  if (resultadoLocal.length > 0)
+    return res.json({ fuente: "local", resultados: resultadoLocal });
+
+  console.log(`🔎 No se encontró "${tituloRaw}" en el JSON.`);
+  return res.json({ 
+      fuente: "local", 
+      total: 0, 
+      resultados: [], 
+      error: "Película no encontrada en local." 
+  });
+});
+
+// 🔧 3. MEJORA EN BÚSQUEDA AVANZADA (dos fuentes en paralelo)
 app.get("/buscar", async (req, res) => {
   const { año, genero, idioma, desde, hasta, q } = req.query;
+  
+  // Preparar parámetros para búsqueda externa
   const paramsExternos = {};
-  if (q)      paramsExternos.q        = q;
-  if (genero) paramsExternos.genre    = genero;
-  if (año)    paramsExternos.year     = año;
-  if (desde)  paramsExternos.desde   = desde;
-  if (hasta)  paramsExternos.hasta   = hasta;
+  if (q) paramsExternos.q = q;
+  if (genero) paramsExternos.genre = genero;
+  if (año) paramsExternos.year = año;
+  if (desde) paramsExternos.desde = desde;
+  if (hasta) paramsExternos.hasta = hasta;
   if (idioma) paramsExternos.language = idioma;
-
-  const filtroLocal = p => {
-    let cumple = true;
-    if (q)      cumple = cumple && ((p.titulo||"").toLowerCase().includes(q.toLowerCase()) || (p.descripcion||"").toLowerCase().includes(q.toLowerCase()));
-    if (año)    cumple = cumple && String(p.año) === String(año);
-    if (genero) cumple = cumple && (p.generos||"").toLowerCase().includes(genero.toLowerCase());
-    if (idioma) cumple = cumple && (p.idioma_original||"").toLowerCase() === idioma.toLowerCase();
-    if (desde && hasta) cumple = cumple && parseInt(p.año) >= parseInt(desde) && parseInt(p.año) <= parseInt(hasta);
-    return cumple;
-  };
-
+  
   try {
-    const [externos, locales] = await Promise.all([
+    // Consultar ambas fuentes en paralelo
+    const [resultadosExternos, resultadosLocales] = await Promise.all([
+      // Solo consultar externa si hay al menos un parámetro válido
       Object.keys(paramsExternos).length > 0 ? fetchExternalSearch(paramsExternos) : Promise.resolve([]),
-      Promise.resolve(peliculas.filter(filtroLocal)),
+      // Búsqueda local en paralelo
+      Promise.resolve(peliculas.filter(p => {
+        let cumple = true;
+        
+        if (q) {
+          const ql = q.toLowerCase();
+          cumple = cumple && (
+            (p.titulo || "").toLowerCase().includes(ql) ||
+            (p.descripcion || "").toLowerCase().includes(ql)
+          );
+        }
+        
+        if (año) cumple = cumple && String(p.año) === String(año);
+        if (genero) cumple = cumple && (p.generos || "").toLowerCase().includes(String(genero).toLowerCase());
+        if (idioma) cumple = cumple && (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase();
+        if (desde && hasta) cumple = cumple && parseInt(p.año) >= parseInt(desde) && parseInt(p.año) <= parseInt(hasta);
+        
+        return cumple;
+      }))
     ]);
-    if (externos.length > 0) {
-      const combinados = combinarResultados(externos, locales);
+    
+    // Si no hay resultados externos pero sí locales, devolver locales
+    if (resultadosExternos.length === 0 && resultadosLocales.length > 0) {
+      return res.json({ fuente: "local", total: resultadosLocales.length, resultados: resultadosLocales });
+    }
+    
+    // Si hay externos, combinarlos dando prioridad
+    if (resultadosExternos.length > 0) {
+      const combinados = combinarResultados(resultadosExternos, resultadosLocales);
       return res.json({ fuente: "combinada", total: combinados.length, resultados: combinados });
     }
-    if (locales.length > 0)
-      return res.json({ fuente: "local", total: locales.length, resultados: locales });
-    return res.json({ fuente: "local", total: 0, resultados: [], error: "Sin resultados." });
-  } catch {
-    const locales = peliculas.filter(filtroLocal);
-    return res.json({ fuente: "local", total: locales.length, resultados: locales });
+    
+    // Si no hay resultados de ningún lado
+    res.json({ fuente: "local", total: 0, resultados: [], error: "No se encontraron películas con los criterios de búsqueda." });
+    
+  } catch (error) {
+    console.error("❌ Error en búsqueda combinada:", error.message);
+    // Fallback a búsqueda local solamente
+    let resultados = peliculas;
+    
+    if (q) {
+      const ql = q.toLowerCase();
+      resultados = resultados.filter(p =>
+        (p.titulo || "").toLowerCase().includes(ql) ||
+        (p.descripcion || "").toLowerCase().includes(ql)
+      );
+    }
+    
+    if (año) resultados = resultados.filter(p => String(p.año) === String(año));
+    if (genero) resultados = resultados.filter(p =>
+      (p.generos || "").toLowerCase().includes(String(genero).toLowerCase())
+    );
+    if (idioma) resultados = resultados.filter(
+      p => (p.idioma_original || "").toLowerCase() === String(idioma).toLowerCase()
+    );
+    if (desde && hasta) resultados = resultados.filter(
+      p => parseInt(p.año) >= parseInt(desde) && parseInt(p.año) <= parseInt(hasta)
+    );
+    
+    res.json({ fuente: "local", total: resultados.length, resultados });
   }
 });
 
-// ===================================================================
-// 👤  RUTAS DE USUARIO (todas POST + authMiddleware)
-// ===================================================================
+// 🔧 2. BÚSQUEDA POR CATEGORÍA (mejorada con dos fuentes)
+app.get("/peliculas/categoria/:genero", async (req, res) => {
+    const generoRaw = decodeURIComponent(req.params.genero || "");
+    const generoBuscado = generoRaw.toLowerCase();
 
-// ── GET de usuario ──────────────────────────────────────────────────
-app.post("/user/get", authMiddleware, (req, res) => {
-  res.json(getOrCreateUser(req.userEmail));
+    try {
+        // Consultar ambas fuentes en paralelo
+        const [resultadosExternos, resultadosLocales] = await Promise.all([
+            fetchExternalSearch({ genre: generoBuscado }),
+            Promise.resolve(peliculas.filter(p =>
+                (p.generos || "").toLowerCase().includes(generoBuscado)
+            ))
+        ]);
+        
+        // Si hay resultados externos, combinarlos dando prioridad
+        if (resultadosExternos.length > 0) {
+            const combinados = combinarResultados(resultadosExternos, resultadosLocales);
+            // Aleatorizar los resultados combinados
+            return res.json({ 
+                fuente: "combinada", 
+                total: combinados.length, 
+                resultados: shuffleArray(combinados) 
+            });
+        }
+        
+        // Si solo hay resultados locales
+        if (resultadosLocales.length > 0) {
+            return res.json({ 
+                fuente: "local", 
+                total: resultadosLocales.length, 
+                resultados: shuffleArray(resultadosLocales) 
+            });
+        }
+        
+        // Si no hay resultados
+        console.log(`🔎 No se encontró la categoría "${generoRaw}" en ninguna fuente.`);
+        return res.json({ 
+            fuente: "local", 
+            total: 0, 
+            resultados: [], 
+            error: "No se encontraron películas en la categoría solicitada." 
+        });
+        
+    } catch (error) {
+        console.error(`❌ Error en búsqueda por categoría "${generoRaw}":`, error.message);
+        // Fallback a búsqueda local solamente
+        let resultados = peliculas.filter(p =>
+            (p.generos || "").toLowerCase().includes(generoBuscado)
+        );
+        
+        if (resultados.length > 0) {
+            return res.json({ 
+                fuente: "local", 
+                total: resultados.length, 
+                resultados: shuffleArray(resultados) 
+            });
+        }
+        
+        return res.json({ 
+            fuente: "local", 
+            total: 0, 
+            resultados: [], 
+            error: "No se encontraron películas en la categoría solicitada." 
+        });
+    }
 });
 
-// ── Cambiar plan ────────────────────────────────────────────────────
-app.post("/user/setplan", authMiddleware, (req, res) => {
-  const { tipoPlan, credits } = req.body;
-  if (!tipoPlan) return res.status(400).json({ error: "Falta tipoPlan" });
-  const user = getOrCreateUser(req.userEmail);
+
+// ------------------- RUTAS DE USUARIOS -------------------
+app.get("/user/get", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  if (!email) return res.status(400).json({ error: "Falta parámetro email" });
+  res.json(getOrCreateUser(email));
+});
+
+app.get("/user/setplan", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const tipoPlan = req.query.tipoPlan;
+  const credits = req.query.credits ? parseInt(req.query.credits) : undefined;
+  if (!email || !tipoPlan) return res.status(400).json({ error: "Falta email o tipoPlan" });
+
+  const user = getOrCreateUser(email);
   user.tipoPlan = tipoPlan;
   if (typeof credits === "number") user.credits = credits;
-  saveUser(req.userEmail, user);
+  saveUser(email, user);
   res.json({ ok: true, user });
 });
 
-// ===================================================================
-// ⭐  FAVORITOS  (POST)
-// ===================================================================
-app.post("/user/add_favorite", authMiddleware, (req, res) => {
-  const { titulo, imagen_url, pelicula_url: raw } = req.body;
-  const pelicula_url = cleanPeliculaUrl(raw);
-  if (!titulo || !pelicula_url) return res.status(400).json({ error: "Faltan parámetros." });
+// Favoritos
+app.get("/user/add_favorite", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const { titulo, imagen_url, pelicula_url: raw_pelicula_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  
+  if (!email || !titulo || !pelicula_url)
+    return res.status(400).json({ error: "Faltan parámetros" });
 
-  const user = getOrCreateUser(req.userEmail);
+  const user = getOrCreateUser(email);
   if (!user.favorites.some(f => f.pelicula_url === pelicula_url)) {
     user.favorites.unshift({ titulo, imagen_url, pelicula_url, addedAt: new Date().toISOString() });
-    enqueueBackground(() => { saveUser(req.userEmail, user); });
+    saveUser(email, user);
   }
   res.json({ ok: true, favorites: user.favorites });
 });
 
-app.post("/user/favorites", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ total: user.favorites.length, favorites: user.favorites });
-});
-
-// Alias GET para compatibilidad HTML (sin auth, con email en query)
 app.get("/user/favorites", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta email" });
@@ -613,64 +596,59 @@ app.get("/user/favorites", (req, res) => {
   res.json({ total: user.favorites.length, favorites: user.favorites });
 });
 
-app.post("/user/favorites/clear", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  user.favorites = [];
-  enqueueBackground(() => saveUser(req.userEmail, user));
-  res.json({ ok: true, message: "Favoritos eliminados." });
+// ELIMINAR TODOS LOS FAVORITOS
+app.get("/user/favorites/clear", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  if (!email) return res.status(400).json({ error: "Falta email" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  user.favorites = []; // Vaciar el array de favoritos
+  saveUser(email, user);
+  
+  res.json({ ok: true, message: "Lista de favoritos eliminada." });
 });
 
-app.post("/user/favorites/remove", authMiddleware, (req, res) => {
-  const pelicula_url = cleanPeliculaUrl(req.body?.pelicula_url);
-  if (!pelicula_url) return res.status(400).json({ error: "Falta pelicula_url." });
-  const user = getOrCreateUser(req.userEmail);
-  const before = user.favorites.length;
+// ELIMINAR UNA PELÍCULA DE FAVORITOS
+app.get("/user/favorites/remove", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const raw_pelicula_url = req.query.pelicula_url;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  
+  if (!email || !pelicula_url) 
+    return res.status(400).json({ error: "Faltan email o pelicula_url" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  const initialLength = user.favorites.length;
+  // Filtrar favoritos para excluir la película con esa URL
   user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
-  if (user.favorites.length < before) {
-    enqueueBackground(() => saveUser(req.userEmail, user));
-    return res.json({ ok: true });
+  
+  if (user.favorites.length < initialLength) {
+    saveUser(email, user);
+    return res.json({ ok: true, message: "Película eliminada de favoritos." });
   }
-  res.status(404).json({ ok: false, message: "No encontrada en favoritos." });
+  res.status(404).json({ ok: false, message: "Película no encontrada en favoritos." });
 });
 
-app.post("/user/favorites/refresh", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ ok: true, refreshed: user.favorites });
-});
+// Historial
+app.get("/user/add_history", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const { titulo, pelicula_url: raw_pelicula_url, imagen_url } = req.query; // Capturar la URL cruda
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url); // Limpiar la URL
+  
+  if (!email || !titulo || !pelicula_url)
+    return res.status(400).json({ error: "Faltan parámetros" });
 
-// ── Alias GET para compatibilidad HTML ──────────────────────────────
-app.get("/user/add_favorite",      (req, res) => legacyGetWrapper("add_favorite",      req, res));
-app.get("/user/favorites/clear",   (req, res) => legacyGetWrapper("favorites/clear",   req, res));
-app.get("/user/favorites/remove",  (req, res) => legacyGetWrapper("favorites/remove",  req, res));
-app.get("/user/favorites/refresh", (req, res) => legacyGetWrapper("favorites/refresh", req, res));
-
-// ===================================================================
-// 📋  HISTORIAL  (POST)
-// ===================================================================
-app.post("/user/add_history", authMiddleware, (req, res) => {
-  const { titulo, pelicula_url: raw, imagen_url } = req.body;
-  const pelicula_url = cleanPeliculaUrl(raw);
-  if (!titulo || !pelicula_url) return res.status(400).json({ error: "Faltan parámetros." });
-
-  const user = getOrCreateUser(req.userEmail);
+  const user = getOrCreateUser(email);
   user.history.unshift({ titulo, pelicula_url, imagen_url, fecha: new Date().toISOString() });
-  if (user.history.length > MAX_HISTORY) user.history = user.history.slice(0, MAX_HISTORY);
-
-  // Actualizar preferencias en segundo plano
-  enqueueBackground(() => {
-    updateUserPreferences(req.userEmail);
-    saveUser(req.userEmail, user);
-  });
-
+  if (user.history.length > 200) user.history = user.history.slice(0, 200);
+  saveUser(email, user);
   res.json({ ok: true, total: user.history.length });
 });
 
-app.post("/user/history", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ total: user.history.length, history: user.history });
-});
-
-// Alias GET compatibilidad
 app.get("/user/history", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
   if (!email) return res.status(400).json({ error: "Falta email" });
@@ -678,483 +656,265 @@ app.get("/user/history", (req, res) => {
   res.json({ total: user.history.length, history: user.history });
 });
 
-app.post("/user/history/clear", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  user.history = [];
-  enqueueBackground(() => saveUser(req.userEmail, user));
-  res.json({ ok: true, message: "Historial eliminado." });
-});
-
-app.post("/user/history/remove", authMiddleware, (req, res) => {
-  const pelicula_url = cleanPeliculaUrl(req.body?.pelicula_url);
-  if (!pelicula_url) return res.status(400).json({ error: "Falta pelicula_url." });
-  const user = getOrCreateUser(req.userEmail);
-  const before = user.history.length;
-  user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
-  if (user.history.length < before) {
-    enqueueBackground(() => saveUser(req.userEmail, user));
-    return res.json({ ok: true });
-  }
-  res.status(404).json({ ok: false, message: "No encontrada en historial." });
-});
-
-app.post("/user/history/refresh", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ ok: true, refreshed: user.history });
-});
-
-// ── Alias GET compatibilidad ─────────────────────────────────────────
-app.get("/user/add_history",       (req, res) => legacyGetWrapper("add_history",       req, res));
-app.get("/user/history/clear",     (req, res) => legacyGetWrapper("history/clear",     req, res));
-app.get("/user/history/remove",    (req, res) => legacyGetWrapper("history/remove",    req, res));
-app.get("/user/history/refresh",   (req, res) => legacyGetWrapper("history/refresh",   req, res));
-
-// ===================================================================
-// 💓  HEARTBEAT  (POST + GET para compatibilidad)
-// ===================================================================
-function handleHeartbeat(email, raw_pelicula_url, currentTime, totalDuration, titulo, res) {
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
-  if (!email || !pelicula_url || isNaN(currentTime) || isNaN(totalDuration) || !titulo)
-    return res.status(400).json({ error: "Faltan parámetros (email, pelicula_url, currentTime, totalDuration, titulo)." });
-
-  const user = getOrCreateUser(email);
-  user.lastActivityTimestamp = new Date().toISOString();
-
-  const percentage = (currentTime / totalDuration) * 100;
-  const isComplete  = percentage >= IS_COMPLETE_THRESHOLD;
-
-  user.resume[pelicula_url] = {
-    titulo, pelicula_url, currentTime, totalDuration,
-    percentage: Math.round(percentage),
-    isComplete,
-    lastHeartbeat: new Date().toISOString(),
-  };
-
-  enqueueBackground(() => saveUser(email, user));
-  res.json({ ok: true, message: "Latido registrado.", progress: user.resume[pelicula_url] });
-}
-
-app.post("/user/heartbeat", authMiddleware, (req, res) => {
-  const { pelicula_url, currentTime, totalDuration, titulo } = req.body;
-  handleHeartbeat(req.userEmail, pelicula_url, parseInt(currentTime), parseInt(totalDuration), titulo, res);
-});
-
-app.get("/user/heartbeat", (req, res) => {
+// ELIMINAR TODO EL HISTORIAL
+app.get("/user/history/clear", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  handleHeartbeat(
-    email,
-    req.query.pelicula_url,
-    parseInt(req.query.currentTime),
-    parseInt(req.query.totalDuration),
-    req.query.titulo,
-    res
-  );
-});
-
-// ===================================================================
-// 💳  CONSUMO DE CRÉDITOS  (POST + GET)
-// ===================================================================
-function handleConsumeCredit(email, raw_pelicula_url, res) {
-  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
-  if (!email || !pelicula_url) return res.status(400).json({ error: "Faltan parámetros." });
-
+  if (!email) return res.status(400).json({ error: "Falta email" });
+  
   const user = getOrCreateUser(email);
-  if (user.tipoPlan !== "creditos")
-    return res.json({ ok: true, consumed: false, message: `Plan '${user.tipoPlan}': sin consumo.` });
-
-  const entry = user.resume[pelicula_url];
-  if (!entry) return res.status(404).json({ ok: false, consumed: false, message: "Sin resumen de reproducción." });
-  if (!entry.isComplete) return res.json({ ok: false, consumed: false, progress: entry.percentage, message: "Vista incompleta (<90%)." });
-  if (entry.creditConsumed) return res.json({ ok: false, consumed: false, message: "Crédito ya consumido." });
-  if (user.credits <= 0) return res.json({ ok: false, consumed: false, message: "Créditos insuficientes." });
-
-  user.credits--;
-  entry.creditConsumed = true;
-  enqueueBackground(() => saveUser(email, user));
-  res.json({ ok: true, consumed: true, remaining_credits: user.credits });
-}
-
-app.post("/user/consume_credit", authMiddleware, (req, res) => {
-  handleConsumeCredit(req.userEmail, req.body?.pelicula_url, res);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  user.history = []; // Vaciar el array del historial
+  saveUser(email, user);
+  
+  res.json({ ok: true, message: "Historial de películas eliminado." });
 });
 
-app.get("/user/consume_credit", (req, res) => {
-  handleConsumeCredit(
-    (req.query.email || "").toLowerCase(),
-    req.query.pelicula_url,
-    res
-  );
+// ELIMINAR UNA PELÍCULA DEL HISTORIAL
+app.get("/user/history/remove", (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const raw_pelicula_url = req.query.pelicula_url;
+  const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+  
+  if (!email || !pelicula_url) 
+    return res.status(400).json({ error: "Faltan email o pelicula_url" });
+  
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
+  
+  const initialLength = user.history.length;
+  // Filtrar el historial para excluir la película con esa URL
+  user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
+  
+  if (user.history.length < initialLength) {
+    saveUser(email, user);
+    return res.json({ ok: true, message: "Película eliminada del historial." });
+  }
+  res.status(404).json({ ok: false, message: "Película no encontrada en el historial." });
 });
 
-// ===================================================================
-// 📊  PERFIL + ACTIVIDAD  (POST + GET)
-// ===================================================================
-app.post("/user/profile", authMiddleware, (req, res) => {
-  buildProfileResponse(req.userEmail, res);
+
+// ------------------- NUEVOS ENDPOINTS -------------------
+
+// 🔁 Refrescar historial (uno o todos)
+app.get("/user/history/refresh", async (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const titulo = req.query.titulo || null;
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
+
+  const toRefresh = titulo
+    ? user.history.filter(h => h.titulo === titulo)
+    : user.history;
+
+  if (!titulo) user.history = toRefresh;
+  saveUser(email, user);
+  res.json({ ok: true, refreshed: toRefresh });
 });
+
+// 🔁 Refrescar favoritos (uno o todos)
+app.get("/user/favorites/refresh", async (req, res) => {
+  const email = (req.query.email || "").toLowerCase();
+  const titulo = req.query.titulo || null;
+  const user = getOrCreateUser(email);
+  if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
+
+  const toRefresh = titulo
+    ? user.favorites.filter(f => f.titulo === titulo)
+    : user.favorites;
+
+  if (!titulo) user.favorites = toRefresh;
+  saveUser(email, user);
+  res.json({ ok: true, refreshed: toRefresh });
+});
+
+// 📊 Perfil con estadísticas
 app.get("/user/profile", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  if (!email) return res.status(400).json({ error: "Falta email" });
-  buildProfileResponse(email, res);
-});
-
-function buildProfileResponse(email, res) {
   const user = getOrCreateUser(email);
-  if (!user) return res.status(400).json({ error: "Usuario no encontrado." });
-  res.json({
-    perfil: {
-      email: user.email,
-      tipoPlan: user.tipoPlan,
-      credits: user.credits,
-      totalFavoritos: user.favorites.length,
-      totalHistorial: user.history.length,
-      totalBusquedas: (user.searches || []).length,
-      preferences: user.preferences || {},
-      ultimaActividad: user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
-      ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos",
-    }
-  });
-}
+  if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
 
-app.post("/user/activity", authMiddleware, (req, res) => {
-  buildActivityResponse(req.userEmail, res);
+  const perfil = {
+    email: user.email,
+    tipoPlan: user.tipoPlan,
+    credits: user.credits,
+    totalFavoritos: user.favorites.length,
+    totalHistorial: user.history.length,
+    ultimaActividad:
+      user.history[0]?.fecha || user.favorites[0]?.addedAt || "Sin actividad",
+    // 🆕 Incluir información de la última actividad del latido
+    ultimaActividadHeartbeat: user.lastActivityTimestamp || "Sin latidos", 
+  };
+  res.json({ perfil });
 });
+
+// 🧾 Actividad combinada
 app.get("/user/activity", (req, res) => {
   const email = (req.query.email || "").toLowerCase();
-  if (!email) return res.status(400).json({ error: "Falta email" });
-  buildActivityResponse(email, res);
-});
-
-function buildActivityResponse(email, res) {
   const user = getOrCreateUser(email);
-  if (!user) return res.status(400).json({ error: "Usuario no encontrado." });
+  if (!user) return res.status(400).json({ error: "Usuario no encontrado" });
 
-  const historial  = user.history.map(h  => ({ tipo: "historial",            titulo: h.titulo,    fecha: h.fecha }));
-  const favoritos  = user.favorites.map(f => ({ tipo: "favorito",             titulo: f.titulo,    fecha: f.addedAt }));
-  const busquedas  = (user.searches || []).map(s => ({ tipo: "busqueda",      titulo: s.query,     fecha: s.fecha }));
-  const resumen    = Object.values(user.resume).map(r => ({
-    tipo: "reproduccion_resumen", titulo: r.titulo, fecha: r.lastHeartbeat,
-    progreso: `${Math.round((r.currentTime / r.totalDuration) * 100)}%`, vistaCompleta: r.isComplete,
+  const historial = user.history.map(h => ({
+    tipo: "historial",
+    titulo: h.titulo,
+    fecha: h.fecha
   }));
-
-  const actividad = [...historial, ...favoritos, ...busquedas, ...resumen]
-    .sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+  const favoritos = user.favorites.map(f => ({
+    tipo: "favorito",
+    titulo: f.titulo,
+    fecha: f.addedAt
+  }));
+  
+  // 🆕 Incluir actividad de resumen de reproducción
+  const resumen = Object.values(user.resume).map(r => ({
+    tipo: "reproduccion_resumen",
+    titulo: r.titulo,
+    fecha: r.lastHeartbeat,
+    progreso: `${Math.round((r.currentTime / r.totalDuration) * 100)}%`,
+    vistaCompleta: r.isComplete,
+  }));
+  
+  const actividad = [...historial, ...favoritos, ...resumen].sort(
+    (a, b) => new Date(b.fecha) - new Date(a.fecha)
+  );
 
   res.json({ total: actividad.length, actividad });
-}
-
-// ===================================================================
-// 🔍  GUARDAR BÚSQUEDAS DEL USUARIO (POST + GET)
-// ===================================================================
-app.post("/user/save_search", authMiddleware, (req, res) => {
-  const { query } = req.body;
-  if (!query) return res.status(400).json({ error: "Falta query." });
-  saveSearchInternal(req.userEmail, query);
-  res.json({ ok: true });
 });
 
-app.get("/user/save_search", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  const query  = req.query.q || req.query.query || "";
-  if (!email || !query) return res.status(400).json({ error: "Falta email o query." });
-  saveSearchInternal(email, query);
-  res.json({ ok: true });
-});
 
-function saveSearchInternal(email, query) {
-  enqueueBackground(() => {
+// ------------------- NUEVOS ENDPOINTS DE SEGUIMIENTO DE STREAMING (LATIDOS) -------------------
+
+/**
+ * 🆕 Sistema de seguimiento de latidos (heartbeat) para el progreso de streaming.
+ * @param email - Correo del usuario.
+ * @param pelicula_url - URL de la película (como clave única).
+ * @param titulo - Título de la película.
+ * @param currentTime - Tiempo actual de reproducción (en segundos).
+ * @param totalDuration - Duración total de la película (en segundos).
+ */
+app.get("/user/heartbeat", (req, res) => {
+    const email = (req.query.email || "").toLowerCase();
+    const raw_pelicula_url = req.query.pelicula_url;
+    const currentTime = parseInt(req.query.currentTime);
+    const totalDuration = parseInt(req.query.totalDuration);
+    const titulo = req.query.titulo;
+
+    const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+    
+    if (!email || !pelicula_url || isNaN(currentTime) || isNaN(totalDuration) || !titulo) {
+        return res.status(400).json({ error: "Faltan parámetros válidos (email, pelicula_url, currentTime, totalDuration, titulo)." });
+    }
+    
     const user = getOrCreateUser(email);
-    if (!user.searches) user.searches = [];
-    user.searches.unshift({ query, fecha: new Date().toISOString() });
-    if (user.searches.length > MAX_SEARCHES) user.searches = user.searches.slice(0, MAX_SEARCHES);
-    updateUserPreferences(email);
+    user.lastActivityTimestamp = new Date().toISOString(); // Actualiza la actividad global del usuario
+
+    // 🔑 Clave única para el resumen de reproducción
+    const key = pelicula_url;
+
+    // Calcula el porcentaje visto
+    const percentage = (currentTime / totalDuration) * 100;
+
+    // Umbral para considerar "vista completa" (por ejemplo, 90%)
+    const IS_COMPLETE_THRESHOLD = 90; 
+    const isComplete = percentage >= IS_COMPLETE_THRESHOLD;
+    
+    // Almacenar/actualizar el resumen de la reproducción
+    user.resume[key] = {
+        titulo: titulo,
+        pelicula_url: pelicula_url,
+        currentTime: currentTime,
+        totalDuration: totalDuration,
+        percentage: Math.round(percentage),
+        isComplete: isComplete,
+        lastHeartbeat: new Date().toISOString()
+    };
+    
     saveUser(email, user);
-  });
-}
-
-// ===================================================================
-// 🎯  PREFERENCIAS  (POST + GET)
-// ===================================================================
-app.post("/user/preferences", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  const { genres, languages } = req.body;
-  if (!user.preferences) user.preferences = { genres: [], languages: [] };
-  if (Array.isArray(genres))    user.preferences.genres    = genres;
-  if (Array.isArray(languages)) user.preferences.languages = languages;
-  enqueueBackground(() => saveUser(req.userEmail, user));
-  res.json({ ok: true, preferences: user.preferences });
-});
-
-app.get("/user/preferences", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ preferences: user.preferences || { genres: [], languages: [] } });
-});
-
-function updateUserPreferences(email) {
-  const user = getOrCreateUser(email);
-  if (!user) return;
-  const { topGenres } = analyzePreferences(user, peliculas);
-  if (!user.preferences) user.preferences = { genres: [], languages: [] };
-  user.preferences.genres = topGenres;
-  // Guardar en data pero sin disparar otro background para evitar recursión
-  const data = readUsersData();
-  data.users[email] = user;
-  const content = JSON.stringify(data, null, 2);
-  fs.writeFileSync(USERS_FILE, content);
-}
-
-// ===================================================================
-// 🤖  RECOMENDACIONES  (POST + GET mixto)
-// ===================================================================
-
-/**
- * POST /recommendations
- * Recomendaciones personalizadas basadas en historial, favoritos y búsquedas.
- */
-app.post("/recommendations", authMiddleware, async (req, res) => {
-  try {
-    const user = getOrCreateUser(req.userEmail);
-    const [externas] = await Promise.all([fetchExternalPeliculas()]);
-    const allMovies  = combinarResultados(externas, peliculas);
-    const recs       = generateRecommendations(user, allMovies, 30);
-
-    // Secciones tipo Netflix
-    const { topGenres } = analyzePreferences(user, allMovies);
-    const porGenero = {};
-    topGenres.forEach(g => {
-      porGenero[g] = allMovies
-        .filter(m => (m.generos || "").toLowerCase().includes(g) && !recs.some(r => r.pelicula_url === m.pelicula_url))
-        .slice(0, 10);
+    
+    res.json({ 
+        ok: true, 
+        message: "Latido registrado.", 
+        progress: user.resume[key] 
     });
+});
 
-    res.json({
-      ok: true,
-      userEmail: req.userEmail,
-      secciones: {
-        recomendado_para_ti: recs,
-        por_genero: porGenero,
-        basado_en_historial: generarBasadoEnHistorial(user, allMovies),
-      }
+/**
+ * 🆕 Endpoint para verificar si una película ha sido vista y consumir 1 crédito.
+ * Solo consume el crédito si el plan es 'creditos' y la película está marcada como 'vista completa' 
+ * en el resumen de reproducción (isComplete: true).
+ * @param email - Correo del usuario.
+ * @param pelicula_url - URL de la película.
+ */
+app.get("/user/consume_credit", (req, res) => {
+    const email = (req.query.email || "").toLowerCase();
+    const raw_pelicula_url = req.query.pelicula_url;
+    const pelicula_url = cleanPeliculaUrl(raw_pelicula_url);
+
+    if (!email || !pelicula_url) {
+        return res.status(400).json({ error: "Faltan parámetros (email, pelicula_url)." });
+    }
+
+    const user = getOrCreateUser(email);
+
+    if (user.tipoPlan !== 'creditos') {
+        return res.json({ 
+            ok: true, 
+            consumed: false, 
+            message: `El plan del usuario es '${user.tipoPlan}', no se requiere consumo de crédito.` 
+        });
+    }
+
+    const resumeEntry = user.resume[pelicula_url];
+
+    if (!resumeEntry) {
+        return res.status(404).json({ 
+            ok: false, 
+            consumed: false, 
+            message: "No se encontró el resumen de reproducción para esta película." 
+        });
+    }
+
+    if (!resumeEntry.isComplete) {
+        return res.json({ 
+            ok: false, 
+            consumed: false, 
+            progress: resumeEntry.percentage, 
+            message: "La película no ha sido vista completamente (requiere >90%)." 
+        });
+    }
+
+    if (user.credits <= 0) {
+        return res.json({ 
+            ok: false, 
+            consumed: false, 
+            message: "Créditos insuficientes." 
+        });
+    }
+
+    // 1. Consumir el crédito
+    user.credits -= 1;
+    
+    // 2. Marcar el resumen como "crédito consumido" para evitar doble cobro
+    resumeEntry.creditConsumed = true; 
+    
+    saveUser(email, user);
+
+    res.json({ 
+        ok: true, 
+        consumed: true, 
+        remaining_credits: user.credits, 
+        message: "Crédito consumido exitosamente. La película se marcó como vista completa." 
     });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
 });
 
-function generarBasadoEnHistorial(user, allMovies) {
-  const result = [];
-  const vistas = user.history.slice(0, 5); // últimas 5 vistas
-  for (const h of vistas) {
-    const movie  = allMovies.find(m => m.pelicula_url === h.pelicula_url || m.titulo === h.titulo);
-    if (!movie) continue;
-    const similar = getSimilarMovies(movie, allMovies, 5);
-    if (similar.length > 0) {
-      result.push({ porque_viste: h.titulo, sugerencias: similar });
-    }
-  }
-  return result;
-}
-
-/**
- * POST /similar
- * Películas similares a una dada.
- * Body: { pelicula_url } o { titulo }
- */
-app.post("/similar", async (req, res) => {
-  const { pelicula_url, titulo } = req.body || {};
-  try {
-    const [externas] = await Promise.all([fetchExternalPeliculas()]);
-    const allMovies  = combinarResultados(externas, peliculas);
-    const target     = allMovies.find(m =>
-      (pelicula_url && m.pelicula_url === pelicula_url) ||
-      (titulo && (m.titulo || "").toLowerCase() === titulo.toLowerCase())
-    );
-    if (!target) return res.status(404).json({ error: "Película no encontrada." });
-    const similares = getSimilarMovies(target, allMovies, 20);
-    res.json({ ok: true, referencia: target.titulo, total: similares.length, resultados: similares });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// GET /similar para compatibilidad
-app.get("/similar", async (req, res) => {
-  const pelicula_url = req.query.pelicula_url;
-  const titulo       = req.query.titulo;
-  try {
-    const [externas] = await Promise.all([fetchExternalPeliculas()]);
-    const allMovies  = combinarResultados(externas, peliculas);
-    const target     = allMovies.find(m =>
-      (pelicula_url && m.pelicula_url === pelicula_url) ||
-      (titulo && (m.titulo || "").toLowerCase() === (titulo || "").toLowerCase())
-    );
-    if (!target) return res.status(404).json({ error: "Película no encontrada." });
-    const similares = getSimilarMovies(target, allMovies, 20);
-    res.json({ ok: true, referencia: target.titulo, total: similares.length, resultados: similares });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/**
- * POST /trending
- * Películas más vistas globalmente.
- */
-app.post("/trending", async (req, res) => {
-  try {
-    const [externas] = await Promise.all([fetchExternalPeliculas()]);
-    const allMovies  = combinarResultados(externas, peliculas);
-    const data       = readUsersData();
-    const trending   = getTrendingMovies(data.users || {}, allMovies, 30);
-    res.json({ ok: true, total: trending.length, resultados: trending });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get("/trending", async (req, res) => {
-  try {
-    const [externas] = await Promise.all([fetchExternalPeliculas()]);
-    const allMovies  = combinarResultados(externas, peliculas);
-    const data       = readUsersData();
-    const trending   = getTrendingMovies(data.users || {}, allMovies, 30);
-    res.json({ ok: true, total: trending.length, resultados: trending });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-/**
- * POST /continue_watching
- * Lista de películas en progreso del usuario.
- */
-app.post("/continue_watching", authMiddleware, (req, res) => {
-  buildContinueWatching(req.userEmail, res);
-});
-app.get("/continue_watching", authMiddleware, (req, res) => {
-  buildContinueWatching(req.userEmail, res);
-});
-// GET con email en query (sin auth) para compatibilidad frontend
-app.get("/continue_watching_public", (req, res) => {
-  const email = (req.query.email || "").toLowerCase();
-  if (!email) return res.status(400).json({ error: "Falta email." });
-  buildContinueWatching(email, res);
-});
-
-function buildContinueWatching(email, res) {
-  const user = getOrCreateUser(email);
-  const inProgress = Object.values(user.resume || {})
-    .filter(r => !r.isComplete && r.percentage > 5)
-    .sort((a, b) => new Date(b.lastHeartbeat) - new Date(a.lastHeartbeat));
-  res.json({ ok: true, total: inProgress.length, resultados: inProgress });
-}
-
-/**
- * POST /history  (alias amigable)
- */
-app.post("/history", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ total: user.history.length, history: user.history });
-});
-
-/**
- * POST /favorites  (alias amigable)
- */
-app.post("/favorites", authMiddleware, (req, res) => {
-  const user = getOrCreateUser(req.userEmail);
-  res.json({ total: user.favorites.length, favorites: user.favorites });
-});
-
-// ===================================================================
-// 🔧  HELPER: compatibilidad GET → lógica interna
-// ===================================================================
-function legacyGetWrapper(action, req, res) {
-  const email        = (req.query.email || "").toLowerCase();
-  const pelicula_url = cleanPeliculaUrl(req.query.pelicula_url);
-  const titulo       = req.query.titulo || "";
-  const imagen_url   = req.query.imagen_url || "";
-
-  if (!email) return res.status(400).json({ error: "Falta email." });
-  const user = getOrCreateUser(email);
-
-  switch (action) {
-    case "add_favorite": {
-      if (!titulo || !pelicula_url) return res.status(400).json({ error: "Faltan parámetros." });
-      if (!user.favorites.some(f => f.pelicula_url === pelicula_url)) {
-        user.favorites.unshift({ titulo, imagen_url, pelicula_url, addedAt: new Date().toISOString() });
-        enqueueBackground(() => saveUser(email, user));
-      }
-      return res.json({ ok: true, favorites: user.favorites });
-    }
-    case "favorites/clear": {
-      user.favorites = [];
-      enqueueBackground(() => saveUser(email, user));
-      return res.json({ ok: true });
-    }
-    case "favorites/remove": {
-      if (!pelicula_url) return res.status(400).json({ error: "Falta pelicula_url." });
-      user.favorites = user.favorites.filter(f => f.pelicula_url !== pelicula_url);
-      enqueueBackground(() => saveUser(email, user));
-      return res.json({ ok: true });
-    }
-    case "favorites/refresh": {
-      return res.json({ ok: true, refreshed: user.favorites });
-    }
-    case "add_history": {
-      if (!titulo || !pelicula_url) return res.status(400).json({ error: "Faltan parámetros." });
-      user.history.unshift({ titulo, pelicula_url, imagen_url, fecha: new Date().toISOString() });
-      if (user.history.length > MAX_HISTORY) user.history = user.history.slice(0, MAX_HISTORY);
-      enqueueBackground(() => {
-        updateUserPreferences(email);
-        saveUser(email, user);
-      });
-      return res.json({ ok: true, total: user.history.length });
-    }
-    case "history/clear": {
-      user.history = [];
-      enqueueBackground(() => saveUser(email, user));
-      return res.json({ ok: true });
-    }
-    case "history/remove": {
-      if (!pelicula_url) return res.status(400).json({ error: "Falta pelicula_url." });
-      user.history = user.history.filter(h => h.pelicula_url !== pelicula_url);
-      enqueueBackground(() => saveUser(email, user));
-      return res.json({ ok: true });
-    }
-    case "history/refresh": {
-      return res.json({ ok: true, refreshed: user.history });
-    }
-    default:
-      return res.status(404).json({ error: "Acción desconocida." });
-  }
-}
-
-// ── Rutas GET legacy para compatibilidad total ──────────────────────
-app.get("/user/get",       (req, res) => { const e = (req.query.email||"").toLowerCase(); if(!e) return res.status(400).json({error:"Falta email"}); res.json(getOrCreateUser(e)); });
-app.get("/user/setplan",   (req, res) => {
-  const email = (req.query.email||"").toLowerCase();
-  const tipoPlan = req.query.tipoPlan;
-  const credits  = req.query.credits ? parseInt(req.query.credits) : undefined;
-  if (!email||!tipoPlan) return res.status(400).json({error:"Falta email o tipoPlan"});
-  const user = getOrCreateUser(email);
-  user.tipoPlan = tipoPlan;
-  if (typeof credits==="number") user.credits=credits;
-  saveUser(email,user);
-  res.json({ok:true,user});
-});
-
-// ===================================================================
-// 🚀  INICIO DEL SERVIDOR
-// ===================================================================
+// ------------------- INICIAR SERVIDOR -------------------
 async function startServer() {
+  // 1. Intentar cargar los datos de usuario desde GitHub
   await loadUsersDataFromGitHub();
+  
+  // 2. Iniciar el servidor
   const PORT = process.env.PORT || 8080;
-  app.listen(PORT, () => {
-    console.log(`✅ PeliPREX API v2 corriendo en http://localhost:${PORT}`);
-    console.log(`🔑 Sistema de API Keys activo (solo validación)`);
-    console.log(`🤖 Motor de recomendaciones listo`);
-    console.log(`🧵 Cola de procesamiento background activa`);
-  });
+  app.listen(PORT, () => console.log(`✅ Servidor corriendo en http://localhost:${PORT}`));
 }
 
 startServer();

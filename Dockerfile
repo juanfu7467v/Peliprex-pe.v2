@@ -10,7 +10,7 @@ FROM base AS build
 RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y build-essential node-gyp pkg-config python-is-python3
 
-COPY package.json package-lock.json* ./
+COPY package.json ./
 RUN npm install
 
 COPY . .
@@ -18,6 +18,6 @@ COPY . .
 FROM base
 COPY --from=build /app /app
 
-# Fly.io usa el puerto 8080 por defecto
+# Exponemos el puerto que usa Fly.toml
 EXPOSE 8080
 CMD [ "npm", "run", "start" ]

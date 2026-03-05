@@ -1,8 +1,6 @@
 app = 'peliprex-pe-v2'
 primary_region = 'gru'
 
-[build]
-
 [http_service]
   internal_port = 8080
   force_https = true
